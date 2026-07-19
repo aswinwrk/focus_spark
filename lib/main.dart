@@ -1,0 +1,1631 @@
+import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'services/audio_service.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Immersive Mobile Experience: Portrait orientation lock & Fullscreen sticky mode
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+  ]);
+  await SystemChrome.setEnabledSystemUIMode(
+    SystemUiMode.immersiveSticky,
+  );
+
+  runApp(const FocusSparkApp());
+}
+
+class FocusSparkApp extends StatelessWidget {
+  const FocusSparkApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Focus Spark',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        useMaterial3: true,
+        fontFamily: 'Roboto',
+      ),
+      home: const FocusSparkScreen(),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Game State Enum
+// ---------------------------------------------------------------------------
+enum GameState {
+  startScreen,
+  playback,
+  playerInput,
+  paused,
+  successTransition,
+  errorTransition,
+}
+
+// ---------------------------------------------------------------------------
+// Theme Model
+// ---------------------------------------------------------------------------
+class GameTheme {
+  final String name;
+  final List<Color> bgGradient;
+  final Color panelBg;
+  final Color panelBorder;
+  final Color tileActiveGlow;
+  final Color tileDefault;
+  final Color textPrimary;
+  final Color accentColor;
+  final Color successColor;
+
+  const GameTheme({
+    required this.name,
+    required this.bgGradient,
+    required this.panelBg,
+    required this.panelBorder,
+    required this.tileActiveGlow,
+    required this.tileDefault,
+    required this.textPrimary,
+    required this.accentColor,
+    required this.successColor,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Main Screen
+// ---------------------------------------------------------------------------
+class FocusSparkScreen extends StatefulWidget {
+  const FocusSparkScreen({super.key});
+
+  @override
+  State<FocusSparkScreen> createState() => _FocusSparkScreenState();
+}
+
+class _FocusSparkScreenState extends State<FocusSparkScreen>
+    with SingleTickerProviderStateMixin {
+  // ── Theme Presets ───────────────────────────────────────────────────────
+  final List<GameTheme> _themes = const [
+    GameTheme(
+      name: 'Cosmic Indigo',
+      bgGradient: [Color(0xFF0C0A1A), Color(0xFF181135), Color(0xFF06050D)],
+      panelBg: Color(0x1F221B35),
+      panelBorder: Color(0x388B5CF6),
+      tileActiveGlow: Color(0xFFC084FC),
+      tileDefault: Color(0x14FFFFFF),
+      textPrimary: Colors.white,
+      accentColor: Color(0xFFA78BFA),
+      successColor: Color(0xFF10B981),
+    ),
+    GameTheme(
+      name: 'Sage Calm',
+      bgGradient: [Color(0xFF161E1A), Color(0xFF243329), Color(0xFF0F1411)],
+      panelBg: Color(0x1F2A382F),
+      panelBorder: Color(0x3B86EFAC),
+      tileActiveGlow: Color(0xFF4ADE80),
+      tileDefault: Color(0x10FFFFFF),
+      textPrimary: Color(0xFFF1FDF7),
+      accentColor: Color(0xFF86EFAC),
+      successColor: Color(0xFF34D399),
+    ),
+    GameTheme(
+      name: 'Midnight Cyber',
+      bgGradient: [Color(0xFF030006), Color(0xFF070B18), Color(0xFF010003)],
+      panelBg: Color(0x240A1021),
+      panelBorder: Color(0x4706B6D4),
+      tileActiveGlow: Color(0xFF22D3EE),
+      tileDefault: Color(0x16FFFFFF),
+      textPrimary: Color(0xFFF8FAFC),
+      accentColor: Color(0xFF06B6D4),
+      successColor: Color(0xFF06B6D4),
+    ),
+  ];
+
+  int _selectedThemeIndex = 0;
+
+  // ── Pentatonic frequencies (C4–D5) ──────────────────────────────────────
+  static const List<double> _frequencies = [
+    261.63, // C4
+    293.66, // D4
+    329.63, // E4
+    349.23, // F4
+    392.00, // G4
+    440.00, // A4
+    493.88, // B4
+    523.25, // C5
+    587.33, // D5
+  ];
+
+  // ── Game State ──────────────────────────────────────────────────────────
+  GameState _gameState = GameState.startScreen;
+  final List<int> _sequence = [];
+  final List<int> _playerInput = [];
+  int _level = 1;
+  int _currentStreak = 0;
+  int _highScore = 0;
+
+  // Session summary (shown briefly on reset)
+  bool _showSessionSummary = false;
+  int _sessionMaxLevel = 1;
+  int _sessionMaxStreak = 0;
+
+  bool _isZenMode = false;
+  bool _isMuted = false;
+
+  // ── Tile Interaction State ───────────────────────────────────────────────
+  int? _activePlaybackTile;
+  int? _correctErrorTile;
+  int? _activeTapTile;
+  final List<bool> _hoverStates = List.filled(9, false);
+  List<double> _tileEntryScales = List.filled(9, 1.0);
+
+  // ── Grid sizing (tracked via LayoutBuilder) ──────────────────────────────
+  double _gridWidth = 300.0;
+  double _gridHeight = 300.0;
+
+  // ── Input Timer ──────────────────────────────────────────────────────────
+  Timer? _inputTimer;
+  double _inputTimerPercentage = 1.0;
+  double _totalInputTime = 8.0;
+  double _elapsedInputTime = 0.0;
+
+  // ── Particle Engine ──────────────────────────────────────────────────────
+  late ParticleManager _particleManager;
+
+  late SharedPreferences _prefs;
+  final math.Random _random = math.Random();
+
+  // ── Lifecycle ────────────────────────────────────────────────────────────
+  @override
+  void initState() {
+    super.initState();
+    _particleManager = ParticleManager(this);
+    _loadSettings();
+  }
+
+  @override
+  void dispose() {
+    _particleManager.disposeTicker();
+    _particleManager.dispose();
+    _cancelInputTimer();
+    super.dispose();
+  }
+
+  // ── Persistence ─────────────────────────────────────────────────────────
+  Future<void> _loadSettings() async {
+    _prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _highScore = _prefs.getInt('focus_spark_high_score') ?? 0;
+      _isZenMode = _prefs.getBool('focus_spark_zen_mode') ?? false;
+      _isMuted = _prefs.getBool('focus_spark_is_muted') ?? false;
+      _selectedThemeIndex = _prefs.getInt('focus_spark_theme_index') ?? 0;
+    });
+  }
+
+  Future<void> _updateHighScore(int score) async {
+    setState(() => _highScore = score);
+    await _prefs.setInt('focus_spark_high_score', score);
+  }
+
+  Future<void> _toggleZenMode() async {
+    setState(() => _isZenMode = !_isZenMode);
+    await _prefs.setBool('focus_spark_zen_mode', _isZenMode);
+  }
+
+  Future<void> _toggleMute() async {
+    setState(() => _isMuted = !_isMuted);
+    await _prefs.setBool('focus_spark_is_muted', _isMuted);
+  }
+
+  Future<void> _selectTheme(int index) async {
+    setState(() => _selectedThemeIndex = index);
+    await _prefs.setInt('focus_spark_theme_index', index);
+  }
+
+  // ── Particle helpers ─────────────────────────────────────────────────────
+  void _spawnTileSparks(int index, Color color) {
+    final col = (index % 3).toDouble();
+    final row = (index ~/ 3).toDouble();
+    final tileW = _gridWidth / 3;
+    final tileH = _gridHeight / 3;
+    _particleManager.spawnSparks(
+      tileW * col + tileW / 2,
+      tileH * row + tileH / 2,
+      color,
+      14,
+    );
+  }
+
+  void _spawnSuccessSparks(Color color) {
+    _particleManager.spawnSparks(_gridWidth / 2, _gridHeight / 2, color, 60);
+  }
+
+  // ── Session Control ──────────────────────────────────────────────────────
+  void _startSession() async {
+    _cancelInputTimer();
+    _particleManager.clear();
+    setState(() {
+      _gameState = GameState.playback;
+      _sequence.clear();
+      _playerInput.clear();
+      _level = 1;
+      _currentStreak = 0;
+      _sessionMaxLevel = 1;
+      _sessionMaxStreak = 0;
+      _showSessionSummary = false;
+      _tileEntryScales = List.filled(9, 0.0);
+    });
+
+    // Staggered tile entry animation
+    for (int i = 0; i < 9; i++) {
+      await Future.delayed(const Duration(milliseconds: 60));
+      if (!mounted || _gameState == GameState.startScreen) return;
+      setState(() => _tileEntryScales[i] = 1.0);
+    }
+
+    setState(() => _sequence.add(_random.nextInt(9)));
+    _runPlayback();
+  }
+
+  // ── Playback Engine ──────────────────────────────────────────────────────
+  Future<void> _runPlayback() async {
+    if (_gameState != GameState.playback) return;
+
+    // Adaptive speed: Max(380ms, 650ms - level*25ms)
+    final int speedMs = (650 - (_level * 25)).clamp(380, 650);
+    final int activeMs = (speedMs * 0.75).round();
+    final int gapMs = speedMs - activeMs;
+
+    // Brief pre-playback pause so user can settle
+    await Future.delayed(const Duration(milliseconds: 300));
+    if (_gameState != GameState.playback) return;
+
+    for (int i = 0; i < _sequence.length; i++) {
+      if (_gameState != GameState.playback) return;
+      final tileIndex = _sequence[i];
+
+      setState(() => _activePlaybackTile = tileIndex);
+
+      final theme = _themes[_selectedThemeIndex];
+      _spawnTileSparks(tileIndex, theme.tileActiveGlow.withValues(alpha: 0.35));
+
+      if (!_isMuted) {
+        AudioService.instance.playTone(_frequencies[tileIndex], activeMs / 1000.0);
+      }
+
+      await Future.delayed(Duration(milliseconds: activeMs));
+      if (_gameState != GameState.playback) return;
+
+      setState(() => _activePlaybackTile = null);
+      await Future.delayed(Duration(milliseconds: gapMs));
+    }
+
+    if (_gameState == GameState.playback) {
+      setState(() {
+        _gameState = GameState.playerInput;
+        _playerInput.clear();
+      });
+      _startInputTimer();
+    }
+  }
+
+  // ── Input Timer ──────────────────────────────────────────────────────────
+  void _startInputTimer() {
+    _cancelInputTimer();
+    _totalInputTime = 6.0 + (_sequence.length * 1.2);
+    _elapsedInputTime = 0.0;
+    _inputTimerPercentage = 1.0;
+
+    _inputTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
+      if (_gameState != GameState.playerInput) {
+        _cancelInputTimer();
+        return;
+      }
+      setState(() {
+        _elapsedInputTime += 0.05;
+        _inputTimerPercentage =
+            (1.0 - (_elapsedInputTime / _totalInputTime)).clamp(0.0, 1.0);
+      });
+      if (_elapsedInputTime >= _totalInputTime) {
+        _cancelInputTimer();
+        _handleTimeout();
+      }
+    });
+  }
+
+  void _cancelInputTimer() {
+    _inputTimer?.cancel();
+    _inputTimer = null;
+  }
+
+  void _handleTimeout() {
+    if (_gameState != GameState.playerInput) return;
+    setState(() {
+      _gameState = GameState.errorTransition;
+      _currentStreak = 0;
+      _correctErrorTile = _sequence[_playerInput.length];
+    });
+    HapticFeedback.vibrate();
+    if (!_isMuted) AudioService.instance.playTone(130.81, 0.4);
+
+    Future.delayed(const Duration(milliseconds: 1200), () {
+      if (mounted && _gameState == GameState.errorTransition) {
+        setState(() {
+          _correctErrorTile = null;
+          _gameState = GameState.playback;
+          _playerInput.clear();
+        });
+        _runPlayback();
+      }
+    });
+  }
+
+  // ── Pause / Resume ───────────────────────────────────────────────────────
+  void _togglePause() {
+    if (_gameState == GameState.playback || _gameState == GameState.playerInput) {
+      _cancelInputTimer();
+      setState(() {
+        _gameState = GameState.paused;
+        _activePlaybackTile = null;
+      });
+      HapticFeedback.selectionClick();
+    } else if (_gameState == GameState.paused) {
+      setState(() => _gameState = GameState.playback);
+      HapticFeedback.selectionClick();
+      _runPlayback();
+    }
+  }
+
+  // ── Reset Session ────────────────────────────────────────────────────────
+  void _resetSession() {
+    _cancelInputTimer();
+    _particleManager.clear();
+
+    // Capture session summary before reset
+    final lvl = _level;
+    final streak = _currentStreak;
+    final wasMeaningful = lvl > 1 || streak > 0;
+
+    setState(() {
+      _gameState = GameState.startScreen;
+      _sequence.clear();
+      _playerInput.clear();
+      _level = 1;
+      _currentStreak = 0;
+      _activePlaybackTile = null;
+      _correctErrorTile = null;
+      _activeTapTile = null;
+      _tileEntryScales = List.filled(9, 1.0);
+      _inputTimerPercentage = 1.0;
+      if (wasMeaningful) {
+        _sessionMaxLevel = lvl;
+        _sessionMaxStreak = streak;
+        _showSessionSummary = true;
+      }
+    });
+    HapticFeedback.mediumImpact();
+
+    if (wasMeaningful) {
+      // Auto-dismiss summary after 3 seconds
+      Future.delayed(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _showSessionSummary = false);
+      });
+    }
+  }
+
+  // ── Tile Click ───────────────────────────────────────────────────────────
+  void _handleTileClick(int clickedIndex) {
+    if (_gameState != GameState.playerInput) return;
+
+    final expectedIndex = _sequence[_playerInput.length];
+    final theme = _themes[_selectedThemeIndex];
+
+    if (clickedIndex == expectedIndex) {
+      setState(() => _playerInput.add(clickedIndex));
+
+      if (_playerInput.length == _sequence.length) {
+        // SUCCESS
+        _cancelInputTimer();
+        setState(() {
+          _gameState = GameState.successTransition;
+          _currentStreak++;
+          _level++;
+          if (_level > _sessionMaxLevel) _sessionMaxLevel = _level;
+          if (_currentStreak > _sessionMaxStreak) _sessionMaxStreak = _currentStreak;
+        });
+        if (_currentStreak > _highScore) _updateHighScore(_currentStreak);
+
+        HapticFeedback.mediumImpact();
+        Future.delayed(const Duration(milliseconds: 80), () => HapticFeedback.mediumImpact());
+
+        _spawnSuccessSparks(theme.accentColor);
+
+        if (!_isMuted) {
+          // Play a rising success arpeggio
+          AudioService.instance.playTone(523.25, 0.18);
+          Future.delayed(const Duration(milliseconds: 120),
+              () => AudioService.instance.playTone(587.33, 0.22));
+        }
+
+        Future.delayed(const Duration(milliseconds: 850), () {
+          if (mounted && _gameState == GameState.successTransition) {
+            setState(() {
+              _gameState = GameState.playback;
+              _sequence.add(_random.nextInt(9));
+            });
+            _runPlayback();
+          }
+        });
+      }
+    } else {
+      // FAILURE (zero-punishment rule)
+      _cancelInputTimer();
+      setState(() {
+        _gameState = GameState.errorTransition;
+        _currentStreak = 0;
+        _correctErrorTile = expectedIndex;
+      });
+      HapticFeedback.vibrate();
+      if (!_isMuted) AudioService.instance.playTone(130.81, 0.4);
+
+      Future.delayed(const Duration(milliseconds: 1200), () {
+        if (mounted && _gameState == GameState.errorTransition) {
+          setState(() {
+            _correctErrorTile = null;
+            _gameState = GameState.playback;
+            _playerInput.clear();
+          });
+          _runPlayback();
+        }
+      });
+    }
+  }
+
+  // ── Status Text ──────────────────────────────────────────────────────────
+  String _getStatusText() {
+    switch (_gameState) {
+      case GameState.startScreen:
+        return 'Clear your mind. Tap Start to begin.';
+      case GameState.playback:
+        return 'Watch the spark pattern carefully...';
+      case GameState.playerInput:
+        return 'Now replicate the pattern from memory.';
+      case GameState.paused:
+        return 'Breathe in, breathe out. Session paused.';
+      case GameState.successTransition:
+        return '✦ Excellent focus! Advancing...';
+      case GameState.errorTransition:
+        return 'Focus shifted. Replaying the pattern...';
+    }
+  }
+
+  // ── Grid Tile Builder ─────────────────────────────────────────────────────
+  Widget _buildGridTile(int index, GameTheme theme) {
+    final bool isHovered = _hoverStates[index];
+    final bool isPlaybackFlash =
+        _gameState == GameState.playback && _activePlaybackTile == index;
+    final bool isTapFlash = _activeTapTile == index;
+    final bool isErrorFlash =
+        _gameState == GameState.errorTransition && _correctErrorTile == index;
+    final bool isSuccess = _gameState == GameState.successTransition;
+    final bool isFlashing = isPlaybackFlash || isTapFlash;
+    final bool inputLock = _gameState != GameState.playerInput;
+
+    double scale = _tileEntryScales[index];
+    if (isTapFlash) {
+      scale *= 0.94;
+    } else if (isFlashing) {
+      scale *= 1.05;
+    }
+
+    double translateY = 0.0;
+    if (isTapFlash) {
+      translateY = 2.0;
+    } else if (isHovered && !inputLock) {
+      translateY = -4.0;
+    }
+
+    Color tileColor = theme.tileDefault;
+    if (isSuccess) {
+      tileColor = theme.successColor.withValues(alpha: 0.18);
+    } else if (isFlashing) {
+      tileColor = theme.tileActiveGlow.withValues(alpha: 0.85);
+    } else if (isErrorFlash) {
+      tileColor = const Color(0xFFEF4444).withValues(alpha: 0.75);
+    } else if (isHovered && !inputLock) {
+      tileColor = theme.tileDefault.withValues(alpha: 0.20);
+    }
+
+    BoxShadow? glowShadow;
+    if (isSuccess) {
+      glowShadow = BoxShadow(
+        color: theme.successColor.withValues(alpha: 0.4),
+        blurRadius: 16,
+        spreadRadius: 1,
+      );
+    } else if (isFlashing) {
+      glowShadow = BoxShadow(
+        color: theme.tileActiveGlow.withValues(alpha: 0.85),
+        blurRadius: 22,
+        spreadRadius: 3,
+      );
+    } else if (isErrorFlash) {
+      glowShadow = BoxShadow(
+        color: const Color(0xFFEF4444).withValues(alpha: 0.80),
+        blurRadius: 22,
+        spreadRadius: 3,
+      );
+    }
+
+    // Highlight the most recently correctly-entered tile briefly
+    final bool playerHitHighlight = _gameState == GameState.playerInput &&
+        _playerInput.isNotEmpty &&
+        _playerInput.last == index;
+
+    return MouseRegion(
+      cursor: inputLock ? SystemMouseCursors.basic : SystemMouseCursors.click,
+      onEnter: (_) {
+        if (!inputLock) setState(() => _hoverStates[index] = true);
+      },
+      onExit: (_) => setState(() => _hoverStates[index] = false),
+      child: GestureDetector(
+        onTapDown: (_) {
+          if (!inputLock) {
+            setState(() => _activeTapTile = index);
+            _spawnTileSparks(index, theme.tileActiveGlow);
+            HapticFeedback.selectionClick();
+            if (!_isMuted) {
+              AudioService.instance.playTone(_frequencies[index], 0.22);
+            }
+          }
+        },
+        onTapUp: (_) {
+          if (_activeTapTile == index) {
+            setState(() => _activeTapTile = null);
+            _handleTileClick(index);
+          }
+        },
+        onTapCancel: () {
+          if (_activeTapTile == index) setState(() => _activeTapTile = null);
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 130),
+          curve: Curves.easeOutCubic,
+          transform: Matrix4.identity()
+            ..translate(0.0, translateY)
+            ..scale(scale),
+          decoration: BoxDecoration(
+            color: tileColor,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isErrorFlash
+                  ? const Color(0xFFEF4444)
+                  : isSuccess
+                      ? theme.successColor.withValues(alpha: 0.5)
+                      : isFlashing
+                          ? theme.tileActiveGlow
+                          : playerHitHighlight
+                              ? theme.accentColor.withValues(alpha: 0.6)
+                              : theme.panelBorder.withValues(alpha: 0.45),
+              width: isFlashing || isErrorFlash || isSuccess ? 2.0 : 1.0,
+            ),
+            boxShadow: glowShadow != null
+                ? [glowShadow]
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.2),
+                      blurRadius: 6,
+                      offset: const Offset(0, 4),
+                    )
+                  ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+              child: Center(
+                child: AnimatedOpacity(
+                  opacity: isFlashing || isErrorFlash || isSuccess ? 0.0 : (inputLock ? 0.0 : 0.15),
+                  duration: const Duration(milliseconds: 200),
+                  child: Text(
+                    '${index + 1}',
+                    style: TextStyle(
+                      color: theme.textPrimary,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w300,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── HUD Item ─────────────────────────────────────────────────────────────
+  Widget _buildHUDItem(String title, String value, GameTheme theme, {Color? valueColor}) {
+    return Column(
+      children: [
+        Text(
+          title,
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 1.8,
+            color: theme.textPrimary.withValues(alpha: 0.45),
+          ),
+        ),
+        const SizedBox(height: 4),
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 260),
+          transitionBuilder: (child, animation) => ScaleTransition(
+            scale: CurvedAnimation(
+              parent: animation,
+              curve: Curves.easeOutBack,
+            ),
+            child: child,
+          ),
+          child: Text(
+            value,
+            key: ValueKey<String>(value),
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              color: valueColor ?? theme.textPrimary,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── Theme Dot ─────────────────────────────────────────────────────────────
+  Widget _buildThemeDot(int index, GameTheme currentTheme) {
+    final isSelected = _selectedThemeIndex == index;
+    final themePreset = _themes[index];
+
+    return GestureDetector(
+      onTap: () {
+        _selectTheme(index);
+        HapticFeedback.selectionClick();
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        margin: const EdgeInsets.only(right: 12),
+        width: isSelected ? 28 : 22,
+        height: isSelected ? 28 : 22,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: LinearGradient(
+            colors: [themePreset.bgGradient[1], themePreset.accentColor],
+          ),
+          border: Border.all(
+            color: isSelected ? currentTheme.textPrimary : Colors.transparent,
+            width: 2.0,
+          ),
+          boxShadow: isSelected
+              ? [
+                  BoxShadow(
+                    color: themePreset.accentColor.withValues(alpha: 0.6),
+                    blurRadius: 10,
+                    spreadRadius: 1,
+                  ),
+                ]
+              : null,
+        ),
+      ),
+    );
+  }
+
+  // ── Sequence Progress Dots ───────────────────────────────────────────────
+  Widget _buildProgressDots(GameTheme theme) {
+    if (_gameState != GameState.playerInput || _sequence.isEmpty) {
+      return const SizedBox(height: 16);
+    }
+    return SizedBox(
+      height: 16,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: List.generate(_sequence.length, (i) {
+          final bool filled = i < _playerInput.length;
+          return AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            margin: const EdgeInsets.symmetric(horizontal: 3),
+            width: filled ? 8 : 6,
+            height: filled ? 8 : 6,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: filled
+                  ? theme.accentColor
+                  : theme.textPrimary.withValues(alpha: 0.2),
+              boxShadow: filled
+                  ? [BoxShadow(color: theme.accentColor.withValues(alpha: 0.5), blurRadius: 6)]
+                  : null,
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  // ── Session Summary Card ─────────────────────────────────────────────────
+  Widget _buildSessionSummary(GameTheme theme) {
+    return AnimatedOpacity(
+      opacity: _showSessionSummary ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 400),
+      child: IgnorePointer(
+        ignoring: !_showSessionSummary,
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 16),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          decoration: BoxDecoration(
+            color: theme.panelBg.withValues(alpha: 0.9),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: theme.accentColor.withValues(alpha: 0.35)),
+            boxShadow: [
+              BoxShadow(color: theme.accentColor.withValues(alpha: 0.1), blurRadius: 20),
+            ],
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              Column(
+                children: [
+                  Text('SESSION',
+                      style: TextStyle(
+                          fontSize: 9,
+                          letterSpacing: 1.6,
+                          color: theme.textPrimary.withValues(alpha: 0.4))),
+                  const SizedBox(height: 2),
+                  Text('SUMMARY',
+                      style: TextStyle(
+                          fontSize: 9,
+                          letterSpacing: 1.6,
+                          color: theme.textPrimary.withValues(alpha: 0.4))),
+                ],
+              ),
+              _buildHUDItem('LEVEL REACHED', _sessionMaxLevel.toString(), theme,
+                  valueColor: theme.accentColor),
+              _buildHUDItem('BEST STREAK', _sessionMaxStreak.toString(), theme),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Pause Overlay ────────────────────────────────────────────────────────
+  Widget _buildPauseOverlay(GameTheme theme) {
+    return Positioned.fill(
+      child: AnimatedOpacity(
+        opacity: _gameState == GameState.paused ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 300),
+        child: IgnorePointer(
+          ignoring: _gameState != GameState.paused,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+              child: Container(
+                color: Colors.black.withValues(alpha: 0.45),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.pause_circle_outline_rounded,
+                        size: 52, color: theme.accentColor.withValues(alpha: 0.85)),
+                    const SizedBox(height: 12),
+                    Text(
+                      'PAUSED',
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 4,
+                        color: theme.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Take a moment to breathe.',
+                      style: TextStyle(
+                          fontSize: 13,
+                          color: theme.textPrimary.withValues(alpha: 0.5)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Splash Screen Decorative Panel ───────────────────────────────────────
+  Widget _buildSplashContent(GameTheme theme) {
+    return Column(
+      children: [
+        const SizedBox(height: 16),
+        // Animated logo glow
+        _PulsingGlow(
+          color: theme.accentColor,
+          child: Container(
+            width: 70,
+            height: 70,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: RadialGradient(
+                colors: [
+                  theme.accentColor.withValues(alpha: 0.5),
+                  theme.accentColor.withValues(alpha: 0.05),
+                ],
+              ),
+              border: Border.all(color: theme.accentColor.withValues(alpha: 0.4), width: 1.5),
+            ),
+            child: Icon(Icons.bolt_rounded, color: theme.accentColor, size: 34),
+          ),
+        ),
+        const SizedBox(height: 20),
+        // Decorative 3x3 preview grid (static)
+        SizedBox(
+          width: double.infinity,
+          child: GridView.count(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            crossAxisCount: 3,
+            mainAxisSpacing: 12,
+            crossAxisSpacing: 12,
+            children: List.generate(9, (index) {
+              return AnimatedContainer(
+                duration: Duration(milliseconds: 400 + index * 60),
+                decoration: BoxDecoration(
+                  color: theme.tileDefault.withValues(alpha: 0.7),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: theme.panelBorder.withValues(alpha: 0.5)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.15),
+                      blurRadius: 6,
+                      offset: const Offset(0, 3),
+                    )
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(14),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                    child: Center(
+                      child: Text(
+                        '${index + 1}',
+                        style: TextStyle(
+                          color: theme.textPrimary.withValues(alpha: 0.2),
+                          fontSize: 16,
+                          fontWeight: FontWeight.w300,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ),
+        ),
+        const SizedBox(height: 20),
+        // How-to-play card
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: theme.tileDefault.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: theme.panelBorder.withValues(alpha: 0.3)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('HOW TO PLAY',
+                  style: TextStyle(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 2,
+                      color: theme.accentColor.withValues(alpha: 0.8))),
+              const SizedBox(height: 8),
+              _buildInstruction('✦', 'Watch the tiles flash in sequence', theme),
+              _buildInstruction('✦', 'Replicate the pattern by tapping', theme),
+              _buildInstruction('✦', 'Each round adds one more step', theme),
+              _buildInstruction('✦', 'No punishment — just keep going!', theme),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+      ],
+    );
+  }
+
+  Widget _buildInstruction(String bullet, String text, GameTheme theme) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Text(bullet,
+              style: TextStyle(
+                  color: theme.accentColor.withValues(alpha: 0.7), fontSize: 10)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                  fontSize: 12,
+                  color: theme.textPrimary.withValues(alpha: 0.6),
+                  height: 1.4),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Main Build ────────────────────────────────────────────────────────────
+  @override
+  Widget build(BuildContext context) {
+    final theme = _themes[_selectedThemeIndex];
+    final isStart = _gameState == GameState.startScreen;
+    final isGameActive = !isStart;
+
+    return Scaffold(
+      body: AnimatedGradientBackground(
+        colors: theme.bgGradient,
+        child: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 20.0),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 420),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // ── Header ────────────────────────────────────────────
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'FOCUS SPARK',
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 4.0,
+                                color: theme.textPrimary,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              'mindful memory matrix',
+                              style: TextStyle(
+                                fontSize: 11,
+                                letterSpacing: 1.2,
+                                color: theme.textPrimary.withValues(alpha: 0.45),
+                              ),
+                            ),
+                          ],
+                        ),
+                        Row(
+                          children: [
+                            _buildIconToggle(
+                              icon: _isMuted
+                                  ? Icons.volume_off_outlined
+                                  : Icons.volume_up_outlined,
+                              isActive: !_isMuted,
+                              onTap: _toggleMute,
+                              theme: theme,
+                              tooltip: _isMuted ? 'Unmute' : 'Mute',
+                            ),
+                            const SizedBox(width: 4),
+                            _buildIconToggle(
+                              icon: _isZenMode ? Icons.spa : Icons.spa_outlined,
+                              isActive: _isZenMode,
+                              onTap: _toggleZenMode,
+                              theme: theme,
+                              tooltip: _isZenMode
+                                  ? 'Disable Zen Mode'
+                                  : 'Enable Zen Mode',
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+
+                    // ── Session Summary (appears on splash after a session) ─
+                    if (isStart) _buildSessionSummary(theme),
+
+                    // ── Glassmorphic Main Panel ───────────────────────────
+                    Container(
+                      decoration: BoxDecoration(
+                        color: theme.panelBg,
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: _gameState == GameState.successTransition
+                              ? theme.successColor.withValues(alpha: 0.55)
+                              : theme.panelBorder,
+                          width: 1.5,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.35),
+                            blurRadius: 32,
+                            offset: const Offset(0, 12),
+                          ),
+                          if (_gameState == GameState.successTransition)
+                            BoxShadow(
+                              color: theme.successColor.withValues(alpha: 0.12),
+                              blurRadius: 24,
+                              spreadRadius: 4,
+                            ),
+                        ],
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+                        child: Padding(
+                          padding: const EdgeInsets.all(22.0),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // ── HUD ─────────────────────────────────────
+                              AnimatedCrossFade(
+                                duration: const Duration(milliseconds: 280),
+                                crossFadeState: _isZenMode || isStart
+                                    ? CrossFadeState.showFirst
+                                    : CrossFadeState.showSecond,
+                                firstChild: const SizedBox(height: 0, width: double.infinity),
+                                secondChild: Padding(
+                                  padding: const EdgeInsets.only(bottom: 18.0),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                                    children: [
+                                      _buildHUDItem('LEVEL', _level.toString(), theme),
+                                      _buildHUDItem('STREAK', _currentStreak.toString(), theme,
+                                          valueColor: _currentStreak > 0
+                                              ? theme.accentColor
+                                              : null),
+                                      _buildHUDItem(
+                                          'BEST', _highScore.toString(), theme),
+                                    ],
+                                  ),
+                                ),
+                              ),
+
+                              // ── Input Timer Bar ──────────────────────────
+                              AnimatedOpacity(
+                                opacity: _gameState == GameState.playerInput ? 1.0 : 0.0,
+                                duration: const Duration(milliseconds: 250),
+                                child: Padding(
+                                  padding: const EdgeInsets.only(bottom: 14.0),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                    children: [
+                                      ClipRRect(
+                                        borderRadius: BorderRadius.circular(4),
+                                        child: Container(
+                                          height: 5,
+                                          color: theme.tileDefault,
+                                          child: FractionallySizedBox(
+                                            alignment: Alignment.centerLeft,
+                                            widthFactor: _inputTimerPercentage,
+                                            child: Container(
+                                              decoration: BoxDecoration(
+                                                gradient: LinearGradient(
+                                                  colors: [
+                                                    _inputTimerPercentage > 0.3
+                                                        ? theme.accentColor
+                                                        : const Color(0xFFEF4444),
+                                                    theme.tileActiveGlow,
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+
+                              // ── Grid (or splash content) ─────────────────
+                              if (isStart)
+                                _buildSplashContent(theme)
+                              else
+                                Stack(
+                                  children: [
+                                    ShakeWidget(
+                                      shake: _gameState == GameState.errorTransition,
+                                      child: LayoutBuilder(
+                                        builder: (context, constraints) {
+                                          _gridWidth = constraints.maxWidth;
+                                          _gridHeight = constraints.maxWidth;
+                                          return GridView.count(
+                                            shrinkWrap: true,
+                                            physics:
+                                                const NeverScrollableScrollPhysics(),
+                                            crossAxisCount: 3,
+                                            mainAxisSpacing: 12,
+                                            crossAxisSpacing: 12,
+                                            children: List.generate(
+                                              9,
+                                              (index) => _buildGridTile(index, theme),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                    // Particle canvas overlay
+                                    Positioned.fill(
+                                      child: IgnorePointer(
+                                        child: ListenableBuilder(
+                                          listenable: _particleManager,
+                                          builder: (context, _) => CustomPaint(
+                                            painter: ParticlePainter(
+                                                particles:
+                                                    _particleManager.particles),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    // Pause overlay
+                                    _buildPauseOverlay(theme),
+                                  ],
+                                ),
+
+                              if (isGameActive) ...[
+                                const SizedBox(height: 14),
+                                // Progress dots
+                                _buildProgressDots(theme),
+                                const SizedBox(height: 12),
+                                // Status text
+                                Text(
+                                  _getStatusText(),
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: theme.textPrimary.withValues(alpha: 0.65),
+                                    height: 1.4,
+                                  ),
+                                ),
+                              ] else ...[
+                                const SizedBox(height: 8),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+
+                    // ── Controls Row ────────────────────────────────────────
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        // Theme Dots
+                        Row(
+                          children: List.generate(
+                            _themes.length,
+                            (i) => _buildThemeDot(i, theme),
+                          ),
+                        ),
+                        // Action Buttons
+                        Row(
+                          children: [
+                            if (isGameActive) ...[
+                              TextButton(
+                                onPressed: _resetSession,
+                                style: TextButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 12, vertical: 8),
+                                ),
+                                child: Text(
+                                  'RESET',
+                                  style: TextStyle(
+                                    color: theme.textPrimary.withValues(alpha: 0.55),
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 12,
+                                    letterSpacing: 1.4,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              ElevatedButton.icon(
+                                onPressed: (_gameState == GameState.successTransition ||
+                                        _gameState == GameState.errorTransition)
+                                    ? null
+                                    : _togglePause,
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor:
+                                      theme.accentColor.withValues(alpha: 0.22),
+                                  foregroundColor: theme.textPrimary,
+                                  disabledBackgroundColor:
+                                      theme.tileDefault.withValues(alpha: 0.4),
+                                  disabledForegroundColor:
+                                      theme.textPrimary.withValues(alpha: 0.3),
+                                  side: BorderSide(
+                                      color: theme.accentColor.withValues(alpha: 0.45)),
+                                  elevation: 0,
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 14, vertical: 10),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12)),
+                                ),
+                                icon: Icon(
+                                  _gameState == GameState.paused
+                                      ? Icons.play_arrow_rounded
+                                      : Icons.pause_rounded,
+                                  size: 18,
+                                ),
+                                label: Text(
+                                  _gameState == GameState.paused ? 'RESUME' : 'PAUSE',
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                      letterSpacing: 1.0),
+                                ),
+                              ),
+                            ] else ...[
+                              ElevatedButton(
+                                onPressed: _startSession,
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: theme.accentColor,
+                                  foregroundColor: Colors.black87,
+                                  elevation: 6,
+                                  shadowColor: theme.accentColor.withValues(alpha: 0.45),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 28, vertical: 14),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(16)),
+                                ),
+                                child: const Text(
+                                  'START SESSION',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                    letterSpacing: 1.4,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIconToggle({
+    required IconData icon,
+    required bool isActive,
+    required VoidCallback onTap,
+    required GameTheme theme,
+    required String tooltip,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: GestureDetector(
+        onTap: () {
+          onTap();
+          HapticFeedback.selectionClick();
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: isActive
+                ? theme.accentColor.withValues(alpha: 0.15)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isActive
+                  ? theme.accentColor.withValues(alpha: 0.4)
+                  : theme.textPrimary.withValues(alpha: 0.12),
+            ),
+          ),
+          child: Icon(
+            icon,
+            color: isActive
+                ? theme.accentColor
+                : theme.textPrimary.withValues(alpha: 0.55),
+            size: 20,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pulsing glow animation widget (for splash logo)
+// ---------------------------------------------------------------------------
+class _PulsingGlow extends StatefulWidget {
+  final Widget child;
+  final Color color;
+  const _PulsingGlow({required this.child, required this.color});
+
+  @override
+  State<_PulsingGlow> createState() => _PulsingGlowState();
+}
+
+class _PulsingGlowState extends State<_PulsingGlow>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      duration: const Duration(milliseconds: 1800),
+      vsync: this,
+    )..repeat(reverse: true);
+    _anim = Tween<double>(begin: 0.5, end: 1.0).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _anim,
+      builder: (context, child) {
+        return Container(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: widget.color.withValues(alpha: 0.35 * _anim.value),
+                blurRadius: 30 * _anim.value,
+                spreadRadius: 6 * _anim.value,
+              ),
+            ],
+          ),
+          child: widget.child,
+        );
+      },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Animated Gradient Background
+// ---------------------------------------------------------------------------
+class AnimatedGradientBackground extends StatefulWidget {
+  final List<Color> colors;
+  final Widget child;
+
+  const AnimatedGradientBackground({
+    super.key,
+    required this.colors,
+    required this.child,
+  });
+
+  @override
+  State<AnimatedGradientBackground> createState() =>
+      _AnimatedGradientBackgroundState();
+}
+
+class _AnimatedGradientBackgroundState extends State<AnimatedGradientBackground>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: const Duration(seconds: 22),
+      vsync: this,
+    )..repeat(reverse: true);
+    _animation = Tween<double>(begin: 0.0, end: 1.0).animate(_controller);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, child) {
+        final val = _animation.value;
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment(-1.0 + val * 0.4, -1.0 + (1 - val) * 0.4),
+              end: Alignment(1.0 - val * 0.4, 1.0 - (1 - val) * 0.4),
+              colors: widget.colors,
+            ),
+          ),
+          child: widget.child,
+        );
+      },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shake Widget
+// ---------------------------------------------------------------------------
+class ShakeWidget extends StatefulWidget {
+  final Widget child;
+  final bool shake;
+
+  const ShakeWidget({super.key, required this.child, required this.shake});
+
+  @override
+  State<ShakeWidget> createState() => _ShakeWidgetState();
+}
+
+class _ShakeWidgetState extends State<ShakeWidget>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: const Duration(milliseconds: 550),
+      vsync: this,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant ShakeWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.shake && !oldWidget.shake) {
+      _controller.forward(from: 0.0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final val = _controller.value;
+        final dx = (val > 0.0 && val < 1.0)
+            ? 11.0 * math.sin(val * 4 * math.pi)
+            : 0.0;
+        return Transform.translate(offset: Offset(dx, 0), child: widget.child);
+      },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Particle System
+// ---------------------------------------------------------------------------
+class SparkParticle {
+  double x, y, vx, vy, size, alpha, lifetime;
+  final Color color;
+  final double maxLifetime;
+
+  SparkParticle({
+    required this.x,
+    required this.y,
+    required this.vx,
+    required this.vy,
+    required this.size,
+    required this.color,
+    required this.maxLifetime,
+  })  : alpha = 1.0,
+        lifetime = 0.0;
+
+  void update(double dt) {
+    x += vx * dt;
+    y += vy * dt;
+    vy += 90.0 * dt;
+    lifetime += dt;
+    alpha = (1.0 - (lifetime / maxLifetime)).clamp(0.0, 1.0);
+  }
+
+  bool get isDead => lifetime >= maxLifetime;
+}
+
+class ParticleManager extends ChangeNotifier {
+  final List<SparkParticle> particles = [];
+  late Ticker _ticker;
+  Duration _lastElapsed = Duration.zero;
+
+  ParticleManager(TickerProvider vsync) {
+    _ticker = vsync.createTicker(_onTick)..start();
+  }
+
+  void spawnSparks(double cx, double cy, Color color, int count) {
+    final rng = math.Random();
+    for (int i = 0; i < count; i++) {
+      final angle = rng.nextDouble() * 2 * math.pi;
+      final speed = 75.0 + rng.nextDouble() * 145.0;
+      particles.add(SparkParticle(
+        x: cx,
+        y: cy,
+        vx: math.cos(angle) * speed,
+        vy: math.sin(angle) * speed - 35.0,
+        size: 2.0 + rng.nextDouble() * 4.5,
+        color: color,
+        maxLifetime: 0.38 + rng.nextDouble() * 0.52,
+      ));
+    }
+    notifyListeners();
+  }
+
+  void _onTick(Duration elapsed) {
+    if (particles.isEmpty) {
+      _lastElapsed = elapsed;
+      return;
+    }
+    double dt =
+        (elapsed.inMicroseconds - _lastElapsed.inMicroseconds) / 1_000_000.0;
+    _lastElapsed = elapsed;
+    if (dt <= 0 || dt > 0.1) dt = 0.016;
+
+    for (int i = particles.length - 1; i >= 0; i--) {
+      particles[i].update(dt);
+      if (particles[i].isDead) particles.removeAt(i);
+    }
+    notifyListeners();
+  }
+
+  void clear() {
+    particles.clear();
+    notifyListeners();
+  }
+
+  void disposeTicker() => _ticker.dispose();
+}
+
+class ParticlePainter extends CustomPainter {
+  final List<SparkParticle> particles;
+  ParticlePainter({required this.particles});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..style = PaintingStyle.fill;
+    for (final p in particles) {
+      paint.color = p.color.withValues(alpha: p.alpha);
+      canvas.drawCircle(Offset(p.x, p.y), p.size, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant ParticlePainter oldDelegate) => true;
+}
