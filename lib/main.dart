@@ -155,6 +155,13 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   int _sessionMaxLevel = 1;
   int _sessionMaxStreak = 0;
 
+  // Track the current playback session ID to cancel outdated async loops
+  int _playbackSessionId = 0;
+
+  // Tutorial display preferences
+  bool _hasSeenTutorial = false;
+  bool _showTutorialCard = true;
+
   bool _isZenMode = false;
   bool _isMuted = false;
 
@@ -205,6 +212,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _isZenMode = _prefs.getBool('focus_spark_zen_mode') ?? false;
       _isMuted = _prefs.getBool('focus_spark_is_muted') ?? false;
       _selectedThemeIndex = _prefs.getInt('focus_spark_theme_index') ?? 0;
+      _hasSeenTutorial = _prefs.getBool('focus_spark_has_seen_tutorial') ?? false;
+      _showTutorialCard = !_hasSeenTutorial;
     });
   }
 
@@ -250,7 +259,16 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void _startSession() async {
     _cancelInputTimer();
     _particleManager.clear();
+    _playbackSessionId++;
+    final currentSession = _playbackSessionId;
+    HapticFeedback.mediumImpact();
+
     setState(() {
+      if (!_hasSeenTutorial) {
+        _hasSeenTutorial = true;
+        _showTutorialCard = false;
+        _prefs.setBool('focus_spark_has_seen_tutorial', true);
+      }
       _gameState = GameState.playback;
       _sequence.clear();
       _playerInput.clear();
@@ -265,10 +283,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     // Staggered tile entry animation
     for (int i = 0; i < 9; i++) {
       await Future.delayed(const Duration(milliseconds: 60));
-      if (!mounted || _gameState == GameState.startScreen) return;
+      if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
       setState(() => _tileEntryScales[i] = 1.0);
     }
 
+    if (_playbackSessionId != currentSession) return;
     setState(() => _sequence.add(_random.nextInt(9)));
     _runPlayback();
   }
@@ -276,6 +295,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   // ── Playback Engine ──────────────────────────────────────────────────────
   Future<void> _runPlayback() async {
     if (_gameState != GameState.playback) return;
+    final currentSession = _playbackSessionId;
 
     // Adaptive speed: Max(380ms, 650ms - level*25ms)
     final int speedMs = (650 - (_level * 25)).clamp(380, 650);
@@ -284,10 +304,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     // Brief pre-playback pause so user can settle
     await Future.delayed(const Duration(milliseconds: 300));
-    if (_gameState != GameState.playback) return;
+    if (_gameState != GameState.playback || _playbackSessionId != currentSession) return;
 
     for (int i = 0; i < _sequence.length; i++) {
-      if (_gameState != GameState.playback) return;
+      if (_gameState != GameState.playback || _playbackSessionId != currentSession) return;
       final tileIndex = _sequence[i];
 
       setState(() => _activePlaybackTile = tileIndex);
@@ -300,13 +320,13 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       }
 
       await Future.delayed(Duration(milliseconds: activeMs));
-      if (_gameState != GameState.playback) return;
+      if (_gameState != GameState.playback || _playbackSessionId != currentSession) return;
 
       setState(() => _activePlaybackTile = null);
       await Future.delayed(Duration(milliseconds: gapMs));
     }
 
-    if (_gameState == GameState.playback) {
+    if (_gameState == GameState.playback && _playbackSessionId == currentSession) {
       setState(() {
         _gameState = GameState.playerInput;
         _playerInput.clear();
@@ -386,6 +406,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void _resetSession() {
     _cancelInputTimer();
     _particleManager.clear();
+    _playbackSessionId++; // Cancel any active async playback loops
 
     // Capture session summary before reset
     final lvl = _level;
@@ -872,77 +893,60 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             child: Icon(Icons.bolt_rounded, color: theme.accentColor, size: 34),
           ),
         ),
-        const SizedBox(height: 20),
-        // Decorative 3x3 preview grid (static)
-        SizedBox(
-          width: double.infinity,
-          child: GridView.count(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisCount: 3,
-            mainAxisSpacing: 12,
-            crossAxisSpacing: 12,
-            children: List.generate(9, (index) {
-              return AnimatedContainer(
-                duration: Duration(milliseconds: 400 + index * 60),
-                decoration: BoxDecoration(
-                  color: theme.tileDefault.withValues(alpha: 0.7),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: theme.panelBorder.withValues(alpha: 0.5)),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.15),
-                      blurRadius: 6,
-                      offset: const Offset(0, 3),
-                    )
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(14),
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                    child: Center(
-                      child: Text(
-                        '${index + 1}',
-                        style: TextStyle(
-                          color: theme.textPrimary.withValues(alpha: 0.2),
-                          fontSize: 16,
-                          fontWeight: FontWeight.w300,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            }),
+        const SizedBox(height: 24),
+        // Optional Help Toggle Button (only shown if they've played before)
+        if (_hasSeenTutorial) ...[
+          TextButton.icon(
+            onPressed: () {
+              setState(() {
+                _showTutorialCard = !_showTutorialCard;
+              });
+              HapticFeedback.selectionClick();
+            },
+            icon: Icon(
+              _showTutorialCard ? Icons.keyboard_arrow_up : Icons.help_outline,
+              size: 16,
+              color: theme.accentColor.withValues(alpha: 0.75),
+            ),
+            label: Text(
+              _showTutorialCard ? 'HIDE GUIDE' : 'HOW TO PLAY',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.5,
+                color: theme.accentColor.withValues(alpha: 0.75),
+              ),
+            ),
           ),
-        ),
-        const SizedBox(height: 20),
-        // How-to-play card
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: theme.tileDefault.withValues(alpha: 0.5),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: theme.panelBorder.withValues(alpha: 0.3)),
+        ],
+        // How-to-play card (shown when _showTutorialCard is true)
+        if (_showTutorialCard) ...[
+          const SizedBox(height: 4),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: theme.tileDefault.withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: theme.panelBorder.withValues(alpha: 0.3)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('HOW TO PLAY',
+                    style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 2,
+                        color: theme.accentColor.withValues(alpha: 0.8))),
+                const SizedBox(height: 8),
+                _buildInstruction('✦', 'Watch the tiles flash in sequence', theme),
+                _buildInstruction('✦', 'Replicate the pattern by tapping', theme),
+                _buildInstruction('✦', 'Each round adds one more step', theme),
+                _buildInstruction('✦', 'No punishment — just keep going!', theme),
+              ],
+            ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('HOW TO PLAY',
-                  style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 2,
-                      color: theme.accentColor.withValues(alpha: 0.8))),
-              const SizedBox(height: 8),
-              _buildInstruction('✦', 'Watch the tiles flash in sequence', theme),
-              _buildInstruction('✦', 'Replicate the pattern by tapping', theme),
-              _buildInstruction('✦', 'Each round adds one more step', theme),
-              _buildInstruction('✦', 'No punishment — just keep going!', theme),
-            ],
-          ),
-        ),
+        ],
         const SizedBox(height: 16),
       ],
     );
@@ -995,29 +999,32 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'FOCUS SPARK',
-                              style: TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 4.0,
-                                color: theme.textPrimary,
+                        if (isStart)
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'FOCUS SPARK',
+                                style: TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 4.0,
+                                  color: theme.textPrimary,
+                                ),
                               ),
-                            ),
-                            const SizedBox(height: 3),
-                            Text(
-                              'mindful memory matrix',
-                              style: TextStyle(
-                                fontSize: 11,
-                                letterSpacing: 1.2,
-                                color: theme.textPrimary.withValues(alpha: 0.45),
+                              const SizedBox(height: 3),
+                              Text(
+                                'mindful memory matrix',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  letterSpacing: 1.2,
+                                  color: theme.textPrimary.withValues(alpha: 0.45),
+                                ),
                               ),
-                            ),
-                          ],
-                        ),
+                            ],
+                          )
+                        else
+                          const SizedBox.shrink(),
                         Row(
                           children: [
                             _buildIconToggle(
@@ -1228,13 +1235,13 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                           children: [
                             if (isGameActive) ...[
                               TextButton(
-                                onPressed: _resetSession,
+                                onPressed: _startSession,
                                 style: TextButton.styleFrom(
                                   padding: const EdgeInsets.symmetric(
                                       horizontal: 12, vertical: 8),
                                 ),
                                 child: Text(
-                                  'RESET',
+                                  'RESTART',
                                   style: TextStyle(
                                     color: theme.textPrimary.withValues(alpha: 0.55),
                                     fontWeight: FontWeight.w600,
