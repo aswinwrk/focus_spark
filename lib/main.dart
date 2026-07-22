@@ -161,6 +161,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   // Level & Session Persistence
   bool _hasSavedSession = false;
 
+  // Hint & Ad System State
+  int _freeHintsRemainingInLevel = 1;
+  bool _isAdActive = false;
+  int? _hintedTile;
+
   // Tutorial display preferences
   bool _hasSeenTutorial = false;
   bool _showTutorialCard = true;
@@ -324,6 +329,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _sessionMaxLevel = 1;
       _sessionMaxStreak = 0;
       _showSessionSummary = false;
+      _freeHintsRemainingInLevel = 1;
+      _hintedTile = null;
       _tileEntryScales = List.filled(9, 0.0);
     });
 
@@ -356,6 +363,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _gameState = GameState.playback;
       _playerInput.clear();
       _showSessionSummary = false;
+      _freeHintsRemainingInLevel = 1;
+      _hintedTile = null;
       _tileEntryScales = List.filled(9, 0.0);
     });
 
@@ -453,6 +462,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _gameState = GameState.errorTransition;
       _currentStreak = 0;
       _correctErrorTile = _sequence[_playerInput.length];
+      _hintedTile = null;
     });
     HapticFeedback.vibrate();
     if (!_isMuted) AudioService.instance.playTone(130.81, 0.4);
@@ -485,6 +495,105 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
   }
 
+  // ── Hint & Direct Rewarded Ad System ────────────────────────────────────
+  void _triggerHint() {
+    if (_gameState != GameState.playerInput || _playerInput.length >= _sequence.length) return;
+    final nextTile = _sequence[_playerInput.length];
+    final theme = _themes[_selectedThemeIndex];
+
+    _spawnTileSparks(nextTile, theme.tileActiveGlow);
+
+    setState(() {
+      _hintedTile = nextTile;
+    });
+
+    HapticFeedback.mediumImpact();
+  }
+
+  void _onHintPressed() {
+    if (_gameState != GameState.playerInput || _isAdActive) return;
+
+    if (_freeHintsRemainingInLevel > 0) {
+      setState(() {
+        _freeHintsRemainingInLevel--;
+      });
+      _triggerHint();
+    } else {
+      _playDirectRewardedAd();
+    }
+  }
+
+  void _playDirectRewardedAd() async {
+    if (_isAdActive) return;
+    _cancelInputTimer();
+    HapticFeedback.mediumImpact();
+
+    setState(() {
+      _isAdActive = true;
+    });
+
+    // Simulate direct rewarded video ad playback (3s)
+    await Future.delayed(const Duration(milliseconds: 3000));
+
+    if (!mounted) return;
+
+    setState(() {
+      _isAdActive = false;
+    });
+
+    if (_gameState == GameState.playerInput) {
+      _startInputTimer();
+      _triggerHint();
+    }
+  }
+
+  Widget _buildDirectAdOverlay(GameTheme theme) {
+    if (!_isAdActive) return const SizedBox.shrink();
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black.withValues(alpha: 0.92),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(20.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.ondemand_video_rounded, color: theme.accentColor, size: 52),
+                const SizedBox(height: 14),
+                Text(
+                  'REWARDED AD PLAYING',
+                  style: TextStyle(
+                    color: theme.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 2.0,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Revealing extra hint upon completion...',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: theme.textPrimary.withValues(alpha: 0.6),
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: 140,
+                  child: LinearProgressIndicator(
+                    color: theme.accentColor,
+                    backgroundColor: theme.tileDefault,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   // ── Reset Session ────────────────────────────────────────────────────────
   void _resetSession() {
     _cancelInputTimer();
@@ -505,6 +614,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _activePlaybackTile = null;
       _correctErrorTile = null;
       _activeTapTile = null;
+      _hintedTile = null;
       _tileEntryScales = List.filled(9, 1.0);
       _inputTimerPercentage = 1.0;
       if (wasMeaningful) {
@@ -527,6 +637,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void _handleTileClick(int clickedIndex) {
     if (_gameState != GameState.playerInput) return;
 
+    if (_hintedTile != null) {
+      setState(() {
+        _hintedTile = null;
+      });
+    }
+
     final expectedIndex = _sequence[_playerInput.length];
     final theme = _themes[_selectedThemeIndex];
 
@@ -540,6 +656,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           _gameState = GameState.successTransition;
           _currentStreak++;
           _level++;
+          _freeHintsRemainingInLevel = 1;
           if (_level > _sessionMaxLevel) _sessionMaxLevel = _level;
           if (_currentStreak > _sessionMaxStreak) _sessionMaxStreak = _currentStreak;
         });
@@ -617,10 +734,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     final bool isPlaybackFlash =
         _gameState == GameState.playback && _activePlaybackTile == index;
     final bool isTapFlash = _activeTapTile == index;
+    final bool isHinted = _hintedTile == index;
     final bool isErrorFlash =
         _gameState == GameState.errorTransition && _correctErrorTile == index;
     final bool isSuccess = _gameState == GameState.successTransition;
-    final bool isFlashing = isPlaybackFlash || isTapFlash;
+    final bool isFlashing = isPlaybackFlash || isTapFlash || isHinted;
     final bool inputLock = _gameState != GameState.playerInput;
 
     double scale = _tileEntryScales[index];
@@ -674,77 +792,81 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _playerInput.isNotEmpty &&
         _playerInput.last == index;
 
-    return MouseRegion(
-      cursor: inputLock ? SystemMouseCursors.basic : SystemMouseCursors.click,
-      onEnter: (_) {
-        if (!inputLock) setState(() => _hoverStates[index] = true);
-      },
-      onExit: (_) => setState(() => _hoverStates[index] = false),
-      child: GestureDetector(
-        onTapDown: (_) {
-          if (!inputLock) {
-            setState(() => _activeTapTile = index);
-            _spawnTileSparks(index, theme.tileActiveGlow);
-            HapticFeedback.selectionClick();
-            if (!_isMuted) {
-              AudioService.instance.playTone(_frequencies[index], 0.22);
+    return _HintTilePulse(
+      isHinted: isHinted,
+      pulseColor: theme.tileActiveGlow,
+      child: MouseRegion(
+        cursor: inputLock ? SystemMouseCursors.basic : SystemMouseCursors.click,
+        onEnter: (_) {
+          if (!inputLock) setState(() => _hoverStates[index] = true);
+        },
+        onExit: (_) => setState(() => _hoverStates[index] = false),
+        child: GestureDetector(
+          onTapDown: (_) {
+            if (!inputLock) {
+              setState(() => _activeTapTile = index);
+              _spawnTileSparks(index, theme.tileActiveGlow);
+              HapticFeedback.selectionClick();
+              if (!_isMuted) {
+                AudioService.instance.playTone(_frequencies[index], 0.22);
+              }
             }
-          }
-        },
-        onTapUp: (_) {
-          if (_activeTapTile == index) {
-            setState(() => _activeTapTile = null);
-            _handleTileClick(index);
-          }
-        },
-        onTapCancel: () {
-          if (_activeTapTile == index) setState(() => _activeTapTile = null);
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 130),
-          curve: Curves.easeOutCubic,
-          transform: Matrix4.identity()
-            ..translate(0.0, translateY)
-            ..scale(scale),
-          decoration: BoxDecoration(
-            color: tileColor,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: isErrorFlash
-                  ? const Color(0xFFEF4444)
-                  : isSuccess
-                      ? theme.successColor.withValues(alpha: 0.5)
-                      : isFlashing
-                          ? theme.tileActiveGlow
-                          : playerHitHighlight
-                              ? theme.accentColor.withValues(alpha: 0.6)
-                              : theme.panelBorder.withValues(alpha: 0.45),
-              width: isFlashing || isErrorFlash || isSuccess ? 2.0 : 1.0,
+          },
+          onTapUp: (_) {
+            if (_activeTapTile == index) {
+              setState(() => _activeTapTile = null);
+              _handleTileClick(index);
+            }
+          },
+          onTapCancel: () {
+            if (_activeTapTile == index) setState(() => _activeTapTile = null);
+          },
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 130),
+            curve: Curves.easeOutCubic,
+            transform: Matrix4.identity()
+              ..translate(0.0, translateY)
+              ..scale(scale),
+            decoration: BoxDecoration(
+              color: tileColor,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: isErrorFlash
+                    ? const Color(0xFFEF4444)
+                    : isSuccess
+                        ? theme.successColor.withValues(alpha: 0.5)
+                        : isFlashing
+                            ? theme.tileActiveGlow
+                            : playerHitHighlight
+                                ? theme.accentColor.withValues(alpha: 0.6)
+                                : theme.panelBorder.withValues(alpha: 0.45),
+                width: isFlashing || isErrorFlash || isSuccess ? 2.0 : 1.0,
+              ),
+              boxShadow: glowShadow != null
+                  ? [glowShadow]
+                  : [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.2),
+                        blurRadius: 6,
+                        offset: const Offset(0, 4),
+                      )
+                    ],
             ),
-            boxShadow: glowShadow != null
-                ? [glowShadow]
-                : [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.2),
-                      blurRadius: 6,
-                      offset: const Offset(0, 4),
-                    )
-                  ],
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-              child: Center(
-                child: AnimatedOpacity(
-                  opacity: isFlashing || isErrorFlash || isSuccess ? 0.0 : (inputLock ? 0.0 : 0.15),
-                  duration: const Duration(milliseconds: 200),
-                  child: Text(
-                    '${index + 1}',
-                    style: TextStyle(
-                      color: theme.textPrimary,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w300,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                child: Center(
+                  child: AnimatedOpacity(
+                    opacity: isFlashing || isErrorFlash || isSuccess ? 0.0 : (inputLock ? 0.0 : 0.15),
+                    duration: const Duration(milliseconds: 200),
+                    child: Text(
+                      '${index + 1}',
+                      style: TextStyle(
+                        color: theme.textPrimary,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w300,
+                      ),
                     ),
                   ),
                 ),
@@ -1279,10 +1401,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                         ),
                                       ),
                                     ),
-                                    // Pause overlay
-                                    _buildPauseOverlay(theme),
-                                  ],
-                                ),
+                                     // Pause overlay
+                                     _buildPauseOverlay(theme),
+                                     // Direct Rewarded Ad overlay
+                                     _buildDirectAdOverlay(theme),
+                                   ],
+                                 ),
 
                               if (isGameActive) ...[
                                 const SizedBox(height: 14),
@@ -1332,6 +1456,51 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                           runSpacing: 6,
                           children: [
                             if (isGameActive) ...[
+                              ElevatedButton.icon(
+                                onPressed: (_gameState != GameState.playerInput || _isAdActive)
+                                    ? null
+                                    : _onHintPressed,
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: _freeHintsRemainingInLevel > 0
+                                      ? theme.accentColor.withValues(alpha: 0.22)
+                                      : const Color(0xFFF59E0B).withValues(alpha: 0.22),
+                                  foregroundColor: theme.textPrimary,
+                                  disabledBackgroundColor:
+                                      theme.tileDefault.withValues(alpha: 0.4),
+                                  disabledForegroundColor:
+                                      theme.textPrimary.withValues(alpha: 0.3),
+                                  side: BorderSide(
+                                    color: _freeHintsRemainingInLevel > 0
+                                        ? theme.accentColor.withValues(alpha: 0.45)
+                                        : const Color(0xFFF59E0B).withValues(alpha: 0.6),
+                                  ),
+                                  elevation: 0,
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 8),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12)),
+                                ),
+                                icon: Icon(
+                                  _freeHintsRemainingInLevel > 0
+                                      ? Icons.lightbulb_outline_rounded
+                                      : Icons.ondemand_video_rounded,
+                                  size: 16,
+                                  color: _freeHintsRemainingInLevel > 0
+                                      ? theme.accentColor
+                                      : const Color(0xFFF59E0B),
+                                ),
+                                label: Text(
+                                  _freeHintsRemainingInLevel > 0 ? 'HINT (FREE)' : 'HINT (+AD)',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 11,
+                                    letterSpacing: 0.8,
+                                    color: _freeHintsRemainingInLevel > 0
+                                        ? theme.accentColor
+                                        : const Color(0xFFF59E0B),
+                                  ),
+                                ),
+                              ),
                               TextButton(
                                 onPressed: _startSession,
                                 style: TextButton.styleFrom(
@@ -1503,6 +1672,106 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           ),
         ),
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hint tile pulse animation widget
+// ---------------------------------------------------------------------------
+class _HintTilePulse extends StatefulWidget {
+  final Widget child;
+  final bool isHinted;
+  final Color pulseColor;
+
+  const _HintTilePulse({
+    required this.child,
+    required this.isHinted,
+    required this.pulseColor,
+  });
+
+  @override
+  State<_HintTilePulse> createState() => _HintTilePulseState();
+}
+
+class _HintTilePulseState extends State<_HintTilePulse>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _scaleAnim;
+  late Animation<double> _glowAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      duration: const Duration(milliseconds: 550),
+      vsync: this,
+    );
+    _scaleAnim = Tween<double>(begin: 1.0, end: 1.15).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+    _glowAnim = Tween<double>(begin: 0.1, end: 1.0).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+
+    if (widget.isHinted) {
+      _ctrl.repeat(reverse: true);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _HintTilePulse oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isHinted && !oldWidget.isHinted) {
+      _ctrl.repeat(reverse: true);
+    } else if (!widget.isHinted && oldWidget.isHinted) {
+      _ctrl.stop();
+      _ctrl.reset();
+    }
+  }
+
+  void _startPulse() {
+    _ctrl.forward(from: 0.0).then((_) {
+      if (mounted) {
+        _ctrl.reverse();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.isHinted && _ctrl.isDismissed) {
+      return widget.child;
+    }
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, child) {
+        return Transform.scale(
+          scale: widget.isHinted ? _scaleAnim.value : 1.0,
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: widget.isHinted
+                  ? [
+                      BoxShadow(
+                        color: widget.pulseColor.withValues(alpha: 0.85 * _glowAnim.value),
+                        blurRadius: 26 * _glowAnim.value,
+                        spreadRadius: 4 * _glowAnim.value,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: child,
+          ),
+        );
+      },
+      child: widget.child,
     );
   }
 }
