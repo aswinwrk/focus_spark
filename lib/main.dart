@@ -927,9 +927,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        margin: const EdgeInsets.only(right: 12),
-        width: isSelected ? 28 : 22,
-        height: isSelected ? 28 : 22,
+        margin: const EdgeInsets.symmetric(horizontal: 3),
+        width: isSelected ? 24 : 18,
+        height: isSelected ? 24 : 18,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           gradient: LinearGradient(
@@ -1195,15 +1195,18 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       body: AnimatedGradientBackground(
         colors: theme.bgGradient,
         child: SafeArea(
-          child: Center(
-            child: SingleChildScrollView(
-              padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 16.0),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 420),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
+          child: Column(
+            children: [
+              Expanded(
+                child: Center(
+                  child: SingleChildScrollView(
+                    padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 16.0),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 420),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
                     // ── Header ────────────────────────────────────────────
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1239,6 +1242,15 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
+                            // Theme Dots (Cosmic Indigo, Sage Calm, Midnight Cyber)
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: List.generate(
+                                _themes.length,
+                                (i) => _buildThemeDot(i, theme),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
                             _buildIconToggle(
                               icon: _isMuted
                                   ? Icons.volume_off_outlined
@@ -1435,19 +1447,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
                     // ── Controls Row ────────────────────────────────────────
                     Wrap(
-                      alignment: WrapAlignment.spaceBetween,
+                      alignment: WrapAlignment.center,
                       crossAxisAlignment: WrapCrossAlignment.center,
                       spacing: 12,
                       runSpacing: 10,
                       children: [
-                        // Theme Dots
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: List.generate(
-                            _themes.length,
-                            (i) => _buildThemeDot(i, theme),
-                          ),
-                        ),
                         // Action Buttons
                         Wrap(
                           alignment: WrapAlignment.end,
@@ -1630,6 +1634,48 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
               ),
             ),
           ),
+        ),
+        _buildBannerAdSpace(theme),
+      ],
+    ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBannerAdSpace(GameTheme theme) {
+    return Container(
+      width: double.infinity,
+      height: 52.0,
+      decoration: BoxDecoration(
+        color: theme.panelBg.withValues(alpha: 0.45),
+        border: Border(
+          top: BorderSide(
+            color: theme.panelBorder.withValues(alpha: 0.35),
+            width: 1.0,
+          ),
+        ),
+      ),
+      child: Center(
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.subtitles_outlined,
+              size: 15,
+              color: theme.textPrimary.withValues(alpha: 0.35),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              'BANNER AD SPACE',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 1.6,
+                color: theme.textPrimary.withValues(alpha: 0.35),
+              ),
+            ),
+          ],
         ),
       ),
     );
