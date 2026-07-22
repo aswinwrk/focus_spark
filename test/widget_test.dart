@@ -14,8 +14,8 @@ void main() {
     // Build our app and trigger a frame.
     await tester.pumpWidget(const FocusSparkApp());
 
-    // Verify that Focus Spark header is displayed
+    // Verify that Focus Spark header and action button are displayed
     expect(find.text('FOCUS SPARK'), findsOneWidget);
-    expect(find.text('START SESSION'), findsOneWidget);
+    expect(find.text('NEW SESSION'), findsOneWidget);
   });
 }

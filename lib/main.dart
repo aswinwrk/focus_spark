@@ -158,6 +158,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   // Track the current playback session ID to cancel outdated async loops
   int _playbackSessionId = 0;
 
+  // Level & Session Persistence
+  bool _hasSavedSession = false;
+
   // Tutorial display preferences
   bool _hasSeenTutorial = false;
   bool _showTutorialCard = true;
@@ -207,6 +210,24 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   // ── Persistence ─────────────────────────────────────────────────────────
   Future<void> _loadSettings() async {
     _prefs = await SharedPreferences.getInstance();
+    final bool hasSavedGame = _prefs.getBool('focus_spark_has_active_game') ?? false;
+    final int savedLevel = _prefs.getInt('focus_spark_current_level') ?? 1;
+    final int savedStreak = _prefs.getInt('focus_spark_current_streak') ?? 0;
+    final String seqStr = _prefs.getString('focus_spark_current_sequence') ?? '';
+
+    List<int> loadedSequence = [];
+    if (hasSavedGame && seqStr.isNotEmpty) {
+      try {
+        loadedSequence = seqStr
+            .split(',')
+            .where((e) => e.trim().isNotEmpty)
+            .map((e) => int.parse(e.trim()))
+            .toList();
+      } catch (_) {
+        loadedSequence = [];
+      }
+    }
+
     setState(() {
       _highScore = _prefs.getInt('focus_spark_high_score') ?? 0;
       _isZenMode = _prefs.getBool('focus_spark_zen_mode') ?? false;
@@ -214,7 +235,33 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _selectedThemeIndex = _prefs.getInt('focus_spark_theme_index') ?? 0;
       _hasSeenTutorial = _prefs.getBool('focus_spark_has_seen_tutorial') ?? false;
       _showTutorialCard = !_hasSeenTutorial;
+
+      if (hasSavedGame && loadedSequence.isNotEmpty) {
+        _hasSavedSession = true;
+        _level = savedLevel > 0 ? savedLevel : 1;
+        _currentStreak = savedStreak;
+        _sequence.clear();
+        _sequence.addAll(loadedSequence);
+      } else {
+        _hasSavedSession = false;
+        _level = 1;
+        _currentStreak = 0;
+        _sequence.clear();
+      }
     });
+  }
+
+  Future<void> _saveGameProgress() async {
+    if (!mounted) return;
+    await _prefs.setBool('focus_spark_has_active_game', true);
+    await _prefs.setInt('focus_spark_current_level', _level);
+    await _prefs.setInt('focus_spark_current_streak', _currentStreak);
+    await _prefs.setString('focus_spark_current_sequence', _sequence.join(','));
+    if (!_hasSavedSession) {
+      setState(() {
+        _hasSavedSession = true;
+      });
+    }
   }
 
   Future<void> _updateHighScore(int score) async {
@@ -289,6 +336,42 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     if (_playbackSessionId != currentSession) return;
     setState(() => _sequence.add(_random.nextInt(9)));
+    await _saveGameProgress();
+    _runPlayback();
+  }
+
+  void _continueSession() async {
+    _cancelInputTimer();
+    _particleManager.clear();
+    _playbackSessionId++;
+    final currentSession = _playbackSessionId;
+    HapticFeedback.mediumImpact();
+
+    setState(() {
+      if (!_hasSeenTutorial) {
+        _hasSeenTutorial = true;
+        _showTutorialCard = false;
+        _prefs.setBool('focus_spark_has_seen_tutorial', true);
+      }
+      _gameState = GameState.playback;
+      _playerInput.clear();
+      _showSessionSummary = false;
+      _tileEntryScales = List.filled(9, 0.0);
+    });
+
+    // Staggered tile entry animation
+    for (int i = 0; i < 9; i++) {
+      await Future.delayed(const Duration(milliseconds: 60));
+      if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
+      setState(() => _tileEntryScales[i] = 1.0);
+    }
+
+    if (_playbackSessionId != currentSession) return;
+    if (_sequence.isEmpty) {
+      _level = 1;
+      _sequence.add(_random.nextInt(9));
+      await _saveGameProgress();
+    }
     _runPlayback();
   }
 
@@ -480,6 +563,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
               _gameState = GameState.playback;
               _sequence.add(_random.nextInt(9));
             });
+            _saveGameProgress();
             _runPlayback();
           }
         });
@@ -492,6 +576,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _currentStreak = 0;
         _correctErrorTile = expectedIndex;
       });
+      _saveGameProgress();
       HapticFeedback.vibrate();
       if (!_isMuted) AudioService.instance.playTone(130.81, 0.4);
 
@@ -981,6 +1066,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     final theme = _themes[_selectedThemeIndex];
     final isStart = _gameState == GameState.startScreen;
     final isGameActive = !isStart;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final horizontalPadding = screenWidth < 360 ? 10.0 : 18.0;
 
     return Scaffold(
       body: AnimatedGradientBackground(
@@ -988,7 +1075,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         child: SafeArea(
           child: Center(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 20.0),
+              padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 16.0),
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 420),
                 child: Column(
@@ -1000,32 +1087,35 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         if (isStart)
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'FOCUS SPARK',
-                                style: TextStyle(
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.bold,
-                                  letterSpacing: 4.0,
-                                  color: theme.textPrimary,
+                          Flexible(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'FOCUS SPARK',
+                                  style: TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 4.0,
+                                    color: theme.textPrimary,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 3),
-                              Text(
-                                'mindful memory matrix',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  letterSpacing: 1.2,
-                                  color: theme.textPrimary.withValues(alpha: 0.45),
+                                const SizedBox(height: 3),
+                                Text(
+                                  'mindful memory matrix',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    letterSpacing: 1.2,
+                                    color: theme.textPrimary.withValues(alpha: 0.45),
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           )
                         else
                           const SizedBox.shrink(),
                         Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
                             _buildIconToggle(
                               icon: _isMuted
@@ -1220,25 +1310,35 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                     const SizedBox(height: 20),
 
                     // ── Controls Row ────────────────────────────────────────
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 12,
+                      runSpacing: 10,
                       children: [
                         // Theme Dots
                         Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: List.generate(
                             _themes.length,
                             (i) => _buildThemeDot(i, theme),
                           ),
                         ),
                         // Action Buttons
-                        Row(
+                        Wrap(
+                          alignment: WrapAlignment.end,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: 6,
+                          runSpacing: 6,
                           children: [
                             if (isGameActive) ...[
                               TextButton(
                                 onPressed: _startSession,
                                 style: TextButton.styleFrom(
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 12, vertical: 8),
+                                      horizontal: 10, vertical: 8),
+                                  minimumSize: Size.zero,
+                                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                                 ),
                                 child: Text(
                                   'RESTART',
@@ -1246,11 +1346,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                     color: theme.textPrimary.withValues(alpha: 0.55),
                                     fontWeight: FontWeight.w600,
                                     fontSize: 12,
-                                    letterSpacing: 1.4,
+                                    letterSpacing: 1.2,
                                   ),
                                 ),
                               ),
-                              const SizedBox(width: 6),
                               ElevatedButton.icon(
                                 onPressed: (_gameState == GameState.successTransition ||
                                         _gameState == GameState.errorTransition)
@@ -1287,27 +1386,70 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                 ),
                               ),
                             ] else ...[
-                              ElevatedButton(
-                                onPressed: _startSession,
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: theme.accentColor,
-                                  foregroundColor: Colors.black87,
-                                  elevation: 6,
-                                  shadowColor: theme.accentColor.withValues(alpha: 0.45),
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 28, vertical: 14),
-                                  shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(16)),
-                                ),
-                                child: const Text(
-                                  'START SESSION',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14,
-                                    letterSpacing: 1.4,
+                              if (_hasSavedSession) ...[
+                                TextButton(
+                                  onPressed: _startSession,
+                                  style: TextButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 8),
+                                    minimumSize: Size.zero,
+                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  child: Text(
+                                    'NEW SESSION',
+                                    style: TextStyle(
+                                      color: theme.textPrimary.withValues(alpha: 0.55),
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 11,
+                                      letterSpacing: 1.1,
+                                    ),
                                   ),
                                 ),
-                              ),
+                                ElevatedButton.icon(
+                                  onPressed: _continueSession,
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: theme.accentColor,
+                                    foregroundColor: Colors.black87,
+                                    elevation: 6,
+                                    shadowColor: theme.accentColor.withValues(alpha: 0.45),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 16, vertical: 12),
+                                    shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(16)),
+                                  ),
+                                  icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                                  label: Text(
+                                    'CONTINUE (LVL $_level)',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                      letterSpacing: 1.1,
+                                    ),
+                                  ),
+                                ),
+                              ] else ...[
+                                ElevatedButton(
+                                  onPressed: _startSession,
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: theme.accentColor,
+                                    foregroundColor: Colors.black87,
+                                    elevation: 6,
+                                    shadowColor: theme.accentColor.withValues(alpha: 0.45),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 24, vertical: 14),
+                                    shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(16)),
+                                  ),
+                                  child: const Text(
+                                    'NEW SESSION',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13,
+                                      letterSpacing: 1.3,
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ],
                           ],
                         ),
