@@ -594,6 +594,28 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     );
   }
 
+  // ── Go Home ──────────────────────────────────────────────────────────────
+  void _goHome() async {
+    _cancelInputTimer();
+    _particleManager.clear();
+    _playbackSessionId++; // Cancel any active async playback loops
+
+    if (_sequence.isNotEmpty) {
+      await _saveGameProgress();
+    }
+
+    setState(() {
+      _gameState = GameState.startScreen;
+      _activePlaybackTile = null;
+      _correctErrorTile = null;
+      _activeTapTile = null;
+      _hintedTile = null;
+      _tileEntryScales = List.filled(9, 1.0);
+      _inputTimerPercentage = 1.0;
+    });
+    HapticFeedback.selectionClick();
+  }
+
   // ── Reset Session ────────────────────────────────────────────────────────
   void _resetSession() {
     _cancelInputTimer();
@@ -1251,6 +1273,16 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                               ),
                             ),
                             const SizedBox(width: 8),
+                            if (isGameActive) ...[
+                              _buildIconToggle(
+                                icon: Icons.home_outlined,
+                                isActive: false,
+                                onTap: _goHome,
+                                theme: theme,
+                                tooltip: 'Return to Home',
+                              ),
+                              const SizedBox(width: 4),
+                            ],
                             _buildIconToggle(
                               icon: _isMuted
                                   ? Icons.volume_off_outlined
