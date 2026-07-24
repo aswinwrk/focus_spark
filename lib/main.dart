@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
@@ -161,6 +162,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   // Level & Session Persistence
   bool _hasSavedSession = false;
 
+  // Hall of Fame Leaderboard State
+  List<LeaderboardEntry> _leaderboard = [];
+
   // Hint & Ad System State
   int _freeHintsRemainingInLevel = 1;
   bool _isAdActive = false;
@@ -253,6 +257,33 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _currentStreak = 0;
         _sequence.clear();
       }
+
+      // Load Hall of Fame Leaderboard
+      final String leaderboardStr = _prefs.getString('focus_spark_hall_of_fame') ?? '';
+      List<LeaderboardEntry> loadedLeaderboard = [];
+      if (leaderboardStr.isNotEmpty) {
+        try {
+          final List<dynamic> jsonList = jsonDecode(leaderboardStr) as List<dynamic>;
+          loadedLeaderboard = jsonList
+              .map((e) => LeaderboardEntry.fromJson(e as Map<String, dynamic>))
+              .toList();
+        } catch (_) {
+          loadedLeaderboard = [];
+        }
+      }
+
+      if (loadedLeaderboard.isEmpty) {
+        // Initial seed entries
+        final now = DateTime.now();
+        loadedLeaderboard = [
+          LeaderboardEntry(playerName: 'Zen Master', level: 12, streak: 12, date: now.subtract(const Duration(days: 1))),
+          LeaderboardEntry(playerName: 'Mindful Seeker', level: 9, streak: 9, date: now.subtract(const Duration(days: 3))),
+          LeaderboardEntry(playerName: 'Focus Sparker', level: 7, streak: 7, date: now.subtract(const Duration(days: 5))),
+          LeaderboardEntry(playerName: 'Memory Runner', level: 5, streak: 5, date: now.subtract(const Duration(days: 7))),
+          LeaderboardEntry(playerName: 'Calm Thinker', level: 3, streak: 3, date: now.subtract(const Duration(days: 9))),
+        ];
+      }
+      _leaderboard = loadedLeaderboard;
     });
   }
 
@@ -272,6 +303,32 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   Future<void> _updateHighScore(int score) async {
     setState(() => _highScore = score);
     await _prefs.setInt('focus_spark_high_score', score);
+  }
+
+  Future<void> _recordLeaderboardScore(int level, int streak) async {
+    if (level <= 1 && streak <= 0) return;
+
+    final entry = LeaderboardEntry(
+      playerName: 'You',
+      level: level,
+      streak: streak,
+      date: DateTime.now(),
+    );
+
+    _leaderboard.add(entry);
+    _leaderboard.sort((a, b) {
+      int cmp = b.level.compareTo(a.level);
+      if (cmp == 0) return b.streak.compareTo(a.streak);
+      return cmp;
+    });
+
+    if (_leaderboard.length > 10) {
+      _leaderboard = _leaderboard.sublist(0, 10);
+    }
+
+    final String jsonStr = jsonEncode(_leaderboard.map((e) => e.toJson()).toList());
+    await _prefs.setString('focus_spark_hall_of_fame', jsonStr);
+    if (mounted) setState(() {});
   }
 
   Future<void> _toggleZenMode() async {
@@ -683,6 +740,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           if (_currentStreak > _sessionMaxStreak) _sessionMaxStreak = _currentStreak;
         });
         if (_currentStreak > _highScore) _updateHighScore(_currentStreak);
+        _recordLeaderboardScore(_level, _currentStreak);
 
         HapticFeedback.mediumImpact();
         Future.delayed(const Duration(milliseconds: 80), () => HapticFeedback.mediumImpact());
@@ -1264,6 +1322,17 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
+                            // Trophy / Leaderboard Icon (Home Screen Only)
+                            if (isStart) ...[
+                              _buildIconToggle(
+                                icon: Icons.emoji_events_outlined,
+                                isActive: false,
+                                onTap: () => _showLeaderboardModal(context, theme),
+                                theme: theme,
+                                tooltip: 'Hall of Fame',
+                              ),
+                              const SizedBox(width: 4),
+                            ],
                             // Theme Dots (Cosmic Indigo, Sage Calm, Midnight Cyber)
                             Row(
                               mainAxisSize: MainAxisSize.min,
@@ -1713,6 +1782,211 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     );
   }
 
+  // ── Leaderboard Modal ──────────────────────────────────────────────────
+  void _showLeaderboardModal(BuildContext context, GameTheme theme) {
+    HapticFeedback.selectionClick();
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withValues(alpha: 0.75),
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 420, maxHeight: 560),
+            decoration: BoxDecoration(
+              color: theme.panelBg,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: theme.panelBorder, width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  blurRadius: 32,
+                  offset: const Offset(0, 12),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+                child: Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Modal Header
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(Icons.emoji_events_rounded,
+                                  color: Color(0xFFFFD700), size: 24),
+                              const SizedBox(width: 8),
+                              Text(
+                                'HALL OF FAME',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 2.0,
+                                  color: theme.textPrimary,
+                                ),
+                              ),
+                            ],
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            icon: Icon(Icons.close_rounded,
+                                color: theme.textPrimary.withValues(alpha: 0.6)),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      const Divider(height: 1, color: Colors.white12),
+                      const SizedBox(height: 12),
+
+                      // Leaderboard Content List
+                      Expanded(
+                        child: _leaderboard.isEmpty
+                            ? Center(
+                                child: Text(
+                                  'No scores recorded yet.\nPlay a session to enter the Hall of Fame!',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: theme.textPrimary.withValues(alpha: 0.5),
+                                  ),
+                                ),
+                              )
+                            : ListView.separated(
+                                itemCount: _leaderboard.length,
+                                separatorBuilder: (_, __) =>
+                                    const SizedBox(height: 8),
+                                itemBuilder: (context, index) {
+                                  final entry = _leaderboard[index];
+                                  final rank = index + 1;
+                                  final isTop3 = rank <= 3;
+                                  Color badgeColor = theme.accentColor;
+                                  if (rank == 1) badgeColor = const Color(0xFFFFD700);
+                                  if (rank == 2) badgeColor = const Color(0xFFC0C0C0);
+                                  if (rank == 3) badgeColor = const Color(0xFFCD7F32);
+
+                                  return Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 14, vertical: 10),
+                                    decoration: BoxDecoration(
+                                      color: isTop3
+                                          ? badgeColor.withValues(alpha: 0.12)
+                                          : theme.tileDefault.withValues(alpha: 0.3),
+                                      borderRadius: BorderRadius.circular(14),
+                                      border: Border.all(
+                                        color: isTop3
+                                            ? badgeColor.withValues(alpha: 0.4)
+                                            : theme.panelBorder.withValues(alpha: 0.3),
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        // Rank Badge
+                                        Container(
+                                          width: 30,
+                                          height: 30,
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: badgeColor.withValues(alpha: 0.22),
+                                            border: Border.all(
+                                                color: badgeColor.withValues(alpha: 0.6),
+                                                width: 1),
+                                          ),
+                                          child: Center(
+                                            child: Text(
+                                              rank == 1
+                                                  ? '🥇'
+                                                  : rank == 2
+                                                      ? '🥈'
+                                                      : rank == 3
+                                                          ? '🥉'
+                                                          : '#$rank',
+                                              style: TextStyle(
+                                                fontSize: isTop3 ? 14 : 11,
+                                                fontWeight: FontWeight.bold,
+                                                color: isTop3
+                                                    ? badgeColor
+                                                    : theme.textPrimary
+                                                        .withValues(alpha: 0.7),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        // Name & Details
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                entry.playerName,
+                                                style: TextStyle(
+                                                  fontSize: 13,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: theme.textPrimary,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                'Streak: ${entry.streak} • ${_formatDate(entry.date)}',
+                                                style: TextStyle(
+                                                  fontSize: 10,
+                                                  color: theme.textPrimary
+                                                      .withValues(alpha: 0.45),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        // Level Tag
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 10, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: badgeColor.withValues(alpha: 0.18),
+                                            borderRadius: BorderRadius.circular(10),
+                                            border: Border.all(
+                                                color: badgeColor.withValues(alpha: 0.35)),
+                                          ),
+                                          child: Text(
+                                            'LVL ${entry.level}',
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold,
+                                              color: badgeColor,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  String _formatDate(DateTime date) {
+    return '${date.day}/${date.month}/${date.year}';
+  }
+
   Widget _buildIconToggle({
     required IconData icon,
     required bool isActive,
@@ -2125,3 +2399,39 @@ class ParticlePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant ParticlePainter oldDelegate) => true;
 }
+
+// ---------------------------------------------------------------------------
+// Leaderboard Data Model
+// ---------------------------------------------------------------------------
+class LeaderboardEntry {
+  final String playerName;
+  final int level;
+  final int streak;
+  final DateTime date;
+
+  LeaderboardEntry({
+    required this.playerName,
+    required this.level,
+    required this.streak,
+    required this.date,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'playerName': playerName,
+        'level': level,
+        'streak': streak,
+        'date': date.toIso8601String(),
+      };
+
+  factory LeaderboardEntry.fromJson(Map<String, dynamic> json) {
+    return LeaderboardEntry(
+      playerName: json['playerName'] as String? ?? 'Mindful Player',
+      level: json['level'] as int? ?? 1,
+      streak: json['streak'] as int? ?? 0,
+      date: json['date'] != null
+          ? DateTime.tryParse(json['date'] as String) ?? DateTime.now()
+          : DateTime.now(),
+    );
+  }
+}
+
