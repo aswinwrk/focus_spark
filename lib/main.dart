@@ -258,6 +258,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _sequence.clear();
       }
 
+      if (_level > _highScore) {
+        _highScore = _level;
+        _prefs.setInt('focus_spark_high_score', _highScore);
+      }
+
       // Load Hall of Fame Leaderboard
       final String leaderboardStr = _prefs.getString('focus_spark_hall_of_fame') ?? '';
       List<LeaderboardEntry> loadedLeaderboard = [];
@@ -738,8 +743,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           _freeHintsRemainingInLevel = 1;
           if (_level > _sessionMaxLevel) _sessionMaxLevel = _level;
           if (_currentStreak > _sessionMaxStreak) _sessionMaxStreak = _currentStreak;
+          if (_level > _highScore) {
+            _highScore = _level;
+          }
         });
-        if (_currentStreak > _highScore) _updateHighScore(_currentStreak);
+        if (_level > _highScore) _updateHighScore(_level);
         _recordLeaderboardScore(_level, _currentStreak);
 
         HapticFeedback.mediumImpact();
@@ -1160,27 +1168,14 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   Widget _buildSplashContent(GameTheme theme) {
     return Column(
       children: [
-        const SizedBox(height: 16),
-        // Animated logo glow
-        _PulsingGlow(
-          color: theme.accentColor,
-          child: Container(
-            width: 70,
-            height: 70,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: RadialGradient(
-                colors: [
-                  theme.accentColor.withValues(alpha: 0.5),
-                  theme.accentColor.withValues(alpha: 0.05),
-                ],
-              ),
-              border: Border.all(color: theme.accentColor.withValues(alpha: 0.4), width: 1.5),
-            ),
-            child: Icon(Icons.bolt_rounded, color: theme.accentColor, size: 34),
-          ),
+        const SizedBox(height: 12),
+        // Orbital Pulsing Hero Logo
+        _OrbitalHeroLogo(
+          accentColor: theme.accentColor,
+          onTap: () => _showLevelRoadmapModal(context, theme),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 18),
+
         // Optional Help Toggle Button (only shown if they've played before)
         if (_hasSeenTutorial) ...[
           TextButton.icon(
@@ -1192,8 +1187,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             },
             icon: Icon(
               _showTutorialCard ? Icons.keyboard_arrow_up : Icons.help_outline,
-              size: 16,
-              color: theme.accentColor.withValues(alpha: 0.75),
+              size: 15,
+              color: theme.accentColor.withValues(alpha: 0.8),
             ),
             label: Text(
               _showTutorialCard ? 'HIDE GUIDE' : 'HOW TO PLAY',
@@ -1201,7 +1196,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                 fontSize: 11,
                 fontWeight: FontWeight.bold,
                 letterSpacing: 1.5,
-                color: theme.accentColor.withValues(alpha: 0.75),
+                color: theme.accentColor.withValues(alpha: 0.8),
               ),
             ),
           ),
@@ -1210,22 +1205,35 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         if (_showTutorialCard) ...[
           const SizedBox(height: 4),
           Container(
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: theme.tileDefault.withValues(alpha: 0.5),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: theme.panelBorder.withValues(alpha: 0.3)),
+              color: theme.tileDefault.withValues(alpha: 0.45),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: theme.panelBorder.withValues(alpha: 0.4)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.15),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
+                ),
+              ],
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('HOW TO PLAY',
-                    style: TextStyle(
-                        fontSize: 9,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 2,
-                        color: theme.accentColor.withValues(alpha: 0.8))),
-                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Icon(Icons.auto_awesome_rounded, size: 12, color: theme.accentColor),
+                    const SizedBox(width: 6),
+                    Text('HOW TO PLAY',
+                        style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 2.2,
+                            color: theme.accentColor)),
+                  ],
+                ),
+                const SizedBox(height: 10),
                 _buildInstruction('✦', 'Watch the tiles flash in sequence', theme),
                 _buildInstruction('✦', 'Replicate the pattern by tapping', theme),
                 _buildInstruction('✦', 'Each round adds one more step', theme),
@@ -1234,7 +1242,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             ),
           ),
         ],
-        const SizedBox(height: 16),
+        const SizedBox(height: 12),
       ],
     );
   }
@@ -1296,6 +1304,23 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: theme.accentColor.withValues(alpha: 0.12),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    'MINDFUL MATRIX',
+                                    style: TextStyle(
+                                      fontSize: 9,
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 2.0,
+                                      color: theme.accentColor,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
                                 Text(
                                   'FOCUS SPARK',
                                   style: TextStyle(
@@ -1303,15 +1328,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                     fontWeight: FontWeight.bold,
                                     letterSpacing: 4.0,
                                     color: theme.textPrimary,
-                                  ),
-                                ),
-                                const SizedBox(height: 3),
-                                Text(
-                                  'mindful memory matrix',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    letterSpacing: 1.2,
-                                    color: theme.textPrimary.withValues(alpha: 0.45),
+                                    shadows: [
+                                      Shadow(
+                                        color: theme.accentColor.withValues(alpha: 0.35),
+                                        blurRadius: 12,
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ],
@@ -1782,6 +1804,279 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     );
   }
 
+  // ── Level Roadmap Modal ────────────────────────────────────────────────
+  void _showLevelRoadmapModal(BuildContext context, GameTheme theme) {
+    HapticFeedback.selectionClick();
+    final effectiveBest = math.max(_level, _highScore);
+    final maxTargetLevel = math.max(effectiveBest + 8, 25);
+    final ScrollController scrollController = ScrollController();
+
+    // Auto-scroll to center current level after frame render
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (scrollController.hasClients) {
+        final targetOffset = (_level - 1) * 70.0;
+        scrollController.animateTo(
+          targetOffset.clamp(0.0, scrollController.position.maxScrollExtent),
+          duration: const Duration(milliseconds: 600),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    });
+
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withValues(alpha: 0.75),
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 420, maxHeight: 600),
+            decoration: BoxDecoration(
+              color: theme.panelBg,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: theme.panelBorder, width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  blurRadius: 32,
+                  offset: const Offset(0, 12),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+                child: Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Header
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.map_rounded,
+                                  color: theme.accentColor, size: 24),
+                              const SizedBox(width: 8),
+                              Text(
+                                'LEVEL ROADMAP',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 2.0,
+                                  color: theme.textPrimary,
+                                ),
+                              ),
+                            ],
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            icon: Icon(Icons.close_rounded,
+                                color: theme.textPrimary.withValues(alpha: 0.6)),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      // Subheader Telemetry
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: theme.accentColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: theme.accentColor.withValues(alpha: 0.3)),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          children: [
+                            Text(
+                              'CURRENT: LVL $_level',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: theme.accentColor,
+                              ),
+                            ),
+                            Text('•', style: TextStyle(color: theme.textPrimary.withValues(alpha: 0.3))),
+                            Text(
+                              'BEST: LVL $effectiveBest',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: theme.textPrimary.withValues(alpha: 0.8),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      const Divider(height: 1, color: Colors.white12),
+                      const SizedBox(height: 14),
+
+                      // Winding Level Path
+                      Expanded(
+                        child: ListView.builder(
+                          controller: scrollController,
+                          itemCount: maxTargetLevel,
+                          itemBuilder: (context, index) {
+                            final lvl = index + 1;
+                            final isCurrent = lvl == _level;
+                            final isBestPeak = lvl == _highScore && _highScore > 0;
+                            final isPassed = (lvl < _level) || (lvl <= _highScore && !isCurrent && !isBestPeak);
+
+                            // Winding S-curve normalized alignment ratio (-0.50 to +0.50)
+                            final double alignX = math.sin(lvl * 0.65) * 0.50;
+                            final double nextAlignX = math.sin((lvl + 1) * 0.65) * 0.50;
+
+                            // Milestone titles at level 5, 10, 15, 20, 25, 30
+                            String? milestoneTitle;
+                            if (lvl == 5) milestoneTitle = '🌟 Spark Initiate';
+                            if (lvl == 10) milestoneTitle = '⚡ Focus Adept';
+                            if (lvl == 15) milestoneTitle = '🧘 Mindful Master';
+                            if (lvl == 20) milestoneTitle = '🔮 Zen Transcendent';
+                            if (lvl == 25) milestoneTitle = '🌌 Cosmic Sage';
+                            if (lvl == 30) milestoneTitle = '👑 Memory Legend';
+
+                            Widget nodeWidget = AnimatedContainer(
+                              duration: const Duration(milliseconds: 300),
+                              width: isCurrent ? 50 : 42,
+                              height: isCurrent ? 50 : 42,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: isCurrent
+                                    ? theme.accentColor
+                                    : isPassed || isBestPeak
+                                        ? theme.accentColor.withValues(alpha: 0.25)
+                                        : theme.tileDefault.withValues(alpha: 0.35),
+                                border: Border.all(
+                                  color: isCurrent
+                                      ? Colors.white
+                                      : isPassed || isBestPeak
+                                          ? theme.accentColor.withValues(alpha: 0.75)
+                                          : theme.panelBorder.withValues(alpha: 0.4),
+                                  width: isCurrent ? 2.5 : 1.5,
+                                ),
+                                boxShadow: isCurrent
+                                    ? [
+                                        BoxShadow(
+                                          color: theme.accentColor.withValues(alpha: 0.65),
+                                          blurRadius: 18,
+                                          spreadRadius: 3,
+                                        ),
+                                      ]
+                                    : isPassed || isBestPeak
+                                        ? [
+                                            BoxShadow(
+                                              color: theme.accentColor.withValues(alpha: 0.25),
+                                              blurRadius: 8,
+                                            ),
+                                          ]
+                                        : null,
+                              ),
+                              child: Center(
+                                child: isCurrent
+                                    ? const Icon(
+                                        Icons.local_fire_department_rounded,
+                                        color: Colors.black87,
+                                        size: 24,
+                                      )
+                                    : isPassed || isBestPeak
+                                        ? Icon(
+                                            Icons.check_rounded,
+                                            color: theme.accentColor,
+                                            size: 18,
+                                          )
+                                        : Text(
+                                            '$lvl',
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold,
+                                              color: theme.textPrimary
+                                                  .withValues(alpha: 0.45),
+                                            ),
+                                          ),
+                              ),
+                            );
+
+                            if (isBestPeak && !isCurrent) {
+                              nodeWidget = _PulsingBestPeakNode(child: nodeWidget);
+                            }
+
+                            return Column(
+                              children: [
+                                if (milestoneTitle != null) ...[
+                                  Container(
+                                    margin: const EdgeInsets.symmetric(vertical: 8),
+                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                                    decoration: BoxDecoration(
+                                      color: isPassed || isCurrent || isBestPeak
+                                          ? const Color(0xFFFFD700).withValues(alpha: 0.15)
+                                          : theme.tileDefault.withValues(alpha: 0.2),
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(
+                                        color: isPassed || isCurrent || isBestPeak
+                                            ? const Color(0xFFFFD700).withValues(alpha: 0.5)
+                                            : theme.panelBorder.withValues(alpha: 0.3),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      milestoneTitle,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        letterSpacing: 1.2,
+                                        color: isPassed || isCurrent || isBestPeak
+                                            ? const Color(0xFFFFD700)
+                                            : theme.textPrimary.withValues(alpha: 0.4),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                                SizedBox(
+                                  height: 70,
+                                  child: Stack(
+                                    children: [
+                                      // Seamless Bezier Curved Connecting Line
+                                      if (lvl < maxTargetLevel)
+                                        Positioned.fill(
+                                          child: CustomPaint(
+                                            painter: _RoadmapSegmentPainter(
+                                              startAlignX: alignX,
+                                              endAlignX: nextAlignX,
+                                              lineColor: isPassed || isCurrent || (lvl < _highScore)
+                                                  ? theme.accentColor.withValues(alpha: 0.65)
+                                                  : theme.panelBorder.withValues(alpha: 0.3),
+                                            ),
+                                          ),
+                                        ),
+                                      // Level Node
+                                      Align(
+                                        alignment: Alignment(alignX, 0.0),
+                                        child: nodeWidget,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   // ── Leaderboard Modal ──────────────────────────────────────────────────
   void _showLeaderboardModal(BuildContext context, GameTheme theme) {
     HapticFeedback.selectionClick();
@@ -2124,6 +2419,270 @@ class _HintTilePulseState extends State<_HintTilePulse>
         );
       },
       child: widget.child,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Smooth breathing scale node widget for Personal Best Peak level
+// ---------------------------------------------------------------------------
+class _PulsingBestPeakNode extends StatefulWidget {
+  final Widget child;
+  const _PulsingBestPeakNode({required this.child});
+
+  @override
+  State<_PulsingBestPeakNode> createState() => _PulsingBestPeakNodeState();
+}
+
+class _PulsingBestPeakNodeState extends State<_PulsingBestPeakNode>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _scaleAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      duration: const Duration(milliseconds: 1600),
+      vsync: this,
+    )..repeat(reverse: true);
+    _scaleAnim = Tween<double>(begin: 0.92, end: 1.08).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, child) {
+        return Transform.scale(
+          scale: _scaleAnim.value,
+          child: child,
+        );
+      },
+      child: widget.child,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Curved Connecting Line Painter for Level Roadmap
+// ---------------------------------------------------------------------------
+class _RoadmapSegmentPainter extends CustomPainter {
+  final double startAlignX;
+  final double endAlignX;
+  final Color lineColor;
+
+  _RoadmapSegmentPainter({
+    required this.startAlignX,
+    required this.endAlignX,
+    required this.lineColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final startX = (size.width / 2) + (startAlignX * (size.width / 2));
+    final endX = (size.width / 2) + (endAlignX * (size.width / 2));
+
+    final paint = Paint()
+      ..color = lineColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.5
+      ..strokeCap = StrokeCap.round;
+
+    final path = Path();
+    path.moveTo(startX, 35);
+    path.cubicTo(startX, 52, endX, 53, endX, 70);
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _RoadmapSegmentPainter oldDelegate) {
+    return oldDelegate.startAlignX != startAlignX ||
+        oldDelegate.endAlignX != endAlignX ||
+        oldDelegate.lineColor != lineColor;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Orbital pulsing hero logo widget
+// ---------------------------------------------------------------------------
+class _OrbitalHeroLogo extends StatefulWidget {
+  final Color accentColor;
+  final VoidCallback? onTap;
+  const _OrbitalHeroLogo({required this.accentColor, this.onTap});
+
+  @override
+  State<_OrbitalHeroLogo> createState() => _OrbitalHeroLogoState();
+}
+
+class _OrbitalHeroLogoState extends State<_OrbitalHeroLogo>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _rotationAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      duration: const Duration(milliseconds: 3200),
+      vsync: this,
+    )..repeat();
+    _rotationAnim = Tween<double>(begin: 0.0, end: 2 * math.pi).animate(_ctrl);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, _) {
+        final scale = _ctrl.value <= 0.5
+            ? (0.88 + (_ctrl.value * 2 * 0.22))
+            : (1.10 - ((_ctrl.value - 0.5) * 2 * 0.22));
+
+        return GestureDetector(
+          onTap: () {
+            if (widget.onTap != null) {
+              HapticFeedback.selectionClick();
+              widget.onTap!();
+            }
+          },
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 105,
+                height: 105,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    // Outer Ambient Glow Aura
+                    Container(
+                      width: 95 * scale,
+                      height: 95 * scale,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: widget.accentColor.withValues(alpha: 0.15),
+                        boxShadow: [
+                          BoxShadow(
+                            color: widget.accentColor.withValues(alpha: 0.35 * scale),
+                            blurRadius: 32 * scale,
+                            spreadRadius: 4,
+                          ),
+                        ],
+                      ),
+                    ),
+                    // Outer Orbit Ring
+                    Transform.rotate(
+                      angle: _rotationAnim.value,
+                      child: Container(
+                        width: 82,
+                        height: 82,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: widget.accentColor.withValues(alpha: 0.35),
+                            width: 1.5,
+                          ),
+                        ),
+                        child: Align(
+                          alignment: Alignment.topCenter,
+                          child: Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: widget.accentColor,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: widget.accentColor,
+                                  blurRadius: 8,
+                                  spreadRadius: 2,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Inner Core Container
+                    Container(
+                      width: 62,
+                      height: 62,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: RadialGradient(
+                          colors: [
+                            widget.accentColor.withValues(alpha: 0.65),
+                            widget.accentColor.withValues(alpha: 0.12),
+                          ],
+                        ),
+                        border: Border.all(
+                          color: widget.accentColor.withValues(alpha: 0.75),
+                          width: 1.8,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.3),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Center(
+                        child: Icon(
+                          Icons.bolt_rounded,
+                          color: widget.accentColor,
+                          size: 34,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                decoration: BoxDecoration(
+                  color: widget.accentColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: widget.accentColor.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.map_outlined, size: 11, color: widget.accentColor),
+                    const SizedBox(width: 4),
+                    Text(
+                      'TAP FOR LEVEL MAP',
+                      style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.4,
+                        color: widget.accentColor,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
