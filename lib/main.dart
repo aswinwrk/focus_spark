@@ -1175,74 +1175,6 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           onTap: () => _showLevelRoadmapModal(context, theme),
         ),
         const SizedBox(height: 18),
-
-        // Optional Help Toggle Button (only shown if they've played before)
-        if (_hasSeenTutorial) ...[
-          TextButton.icon(
-            onPressed: () {
-              setState(() {
-                _showTutorialCard = !_showTutorialCard;
-              });
-              HapticFeedback.selectionClick();
-            },
-            icon: Icon(
-              _showTutorialCard ? Icons.keyboard_arrow_up : Icons.help_outline,
-              size: 15,
-              color: theme.accentColor.withValues(alpha: 0.8),
-            ),
-            label: Text(
-              _showTutorialCard ? 'HIDE GUIDE' : 'HOW TO PLAY',
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 1.5,
-                color: theme.accentColor.withValues(alpha: 0.8),
-              ),
-            ),
-          ),
-        ],
-        // How-to-play card (shown when _showTutorialCard is true)
-        if (_showTutorialCard) ...[
-          const SizedBox(height: 4),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: theme.tileDefault.withValues(alpha: 0.45),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: theme.panelBorder.withValues(alpha: 0.4)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.15),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.auto_awesome_rounded, size: 12, color: theme.accentColor),
-                    const SizedBox(width: 6),
-                    Text('HOW TO PLAY',
-                        style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 2.2,
-                            color: theme.accentColor)),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                _buildInstruction('✦', 'Watch the tiles flash in sequence', theme),
-                _buildInstruction('✦', 'Replicate the pattern by tapping', theme),
-                _buildInstruction('✦', 'Each round adds one more step', theme),
-                _buildInstruction('✦', 'No punishment — just keep going!', theme),
-              ],
-            ),
-          ),
-        ],
-        const SizedBox(height: 12),
       ],
     );
   }
@@ -1285,122 +1217,108 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         child: SafeArea(
           child: Column(
             children: [
+              // ── Full-Width Edge-to-Edge Header Bar ──────────────────────────────
+              Padding(
+                padding: EdgeInsets.only(
+                  left: horizontalPadding,
+                  right: horizontalPadding,
+                  top: 28.0,
+                  bottom: 16.0,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const SizedBox.shrink(),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // 1. Leaderboard / Hall of Fame Icon (Home Screen Only)
+                        if (isStart) ...[
+                          _buildIconToggle(
+                            icon: Icons.emoji_events_outlined,
+                            isActive: false,
+                            onTap: () => _showLeaderboardModal(context, theme),
+                            theme: theme,
+                            tooltip: 'Hall of Fame',
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+
+                        // Return to Home (Active Gameplay Only)
+                        if (isGameActive) ...[
+                          _buildIconToggle(
+                            icon: Icons.home_outlined,
+                            isActive: false,
+                            onTap: _goHome,
+                            theme: theme,
+                            tooltip: 'Return to Home',
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+
+                        // 2. Sound Toggle Button
+                        _buildIconToggle(
+                          icon: _isMuted
+                              ? Icons.volume_off_outlined
+                              : Icons.volume_up_outlined,
+                          isActive: !_isMuted,
+                          onTap: _toggleMute,
+                          theme: theme,
+                          tooltip: _isMuted ? 'Unmute' : 'Mute',
+                        ),
+                        const SizedBox(width: 4),
+
+                        // 3. How to Play Icon (Home Screen Only)
+                        if (isStart) ...[
+                          _buildIconToggle(
+                            icon: Icons.help_outline_rounded,
+                            isActive: false,
+                            onTap: () => _showInstructionsModal(context, theme),
+                            theme: theme,
+                            tooltip: 'How to Play',
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+
+                        // 4. Zen Mode Button
+                        _buildIconToggle(
+                          icon: _isZenMode ? Icons.spa : Icons.spa_outlined,
+                          isActive: _isZenMode,
+                          onTap: _toggleZenMode,
+                          theme: theme,
+                          tooltip: _isZenMode
+                              ? 'Disable Zen Mode'
+                              : 'Enable Zen Mode',
+                        ),
+                        const SizedBox(width: 4),
+
+                        // 5. Theme Dots (Cosmic Indigo, Sage Calm, Midnight Cyber)
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: List.generate(
+                            _themes.length,
+                            (i) => _buildThemeDot(i, theme),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+
+              // ── Centered Main Content Area ─────────────────────────────────────
               Expanded(
                 child: Center(
                   child: SingleChildScrollView(
-                    padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 16.0),
+                    padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 8.0),
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxWidth: 420),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                    // ── Header ────────────────────────────────────────────
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        if (isStart)
-                          Flexible(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: theme.accentColor.withValues(alpha: 0.12),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: Text(
-                                    'MINDFUL MATRIX',
-                                    style: TextStyle(
-                                      fontSize: 9,
-                                      fontWeight: FontWeight.bold,
-                                      letterSpacing: 2.0,
-                                      color: theme.accentColor,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  'FOCUS SPARK',
-                                  style: TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 4.0,
-                                    color: theme.textPrimary,
-                                    shadows: [
-                                      Shadow(
-                                        color: theme.accentColor.withValues(alpha: 0.35),
-                                        blurRadius: 12,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          )
-                        else
-                          const SizedBox.shrink(),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            // Trophy / Leaderboard Icon (Home Screen Only)
-                            if (isStart) ...[
-                              _buildIconToggle(
-                                icon: Icons.emoji_events_outlined,
-                                isActive: false,
-                                onTap: () => _showLeaderboardModal(context, theme),
-                                theme: theme,
-                                tooltip: 'Hall of Fame',
-                              ),
-                              const SizedBox(width: 4),
-                            ],
-                            // Theme Dots (Cosmic Indigo, Sage Calm, Midnight Cyber)
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: List.generate(
-                                _themes.length,
-                                (i) => _buildThemeDot(i, theme),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            if (isGameActive) ...[
-                              _buildIconToggle(
-                                icon: Icons.home_outlined,
-                                isActive: false,
-                                onTap: _goHome,
-                                theme: theme,
-                                tooltip: 'Return to Home',
-                              ),
-                              const SizedBox(width: 4),
-                            ],
-                            _buildIconToggle(
-                              icon: _isMuted
-                                  ? Icons.volume_off_outlined
-                                  : Icons.volume_up_outlined,
-                              isActive: !_isMuted,
-                              onTap: _toggleMute,
-                              theme: theme,
-                              tooltip: _isMuted ? 'Unmute' : 'Mute',
-                            ),
-                            const SizedBox(width: 4),
-                            _buildIconToggle(
-                              icon: _isZenMode ? Icons.spa : Icons.spa_outlined,
-                              isActive: _isZenMode,
-                              onTap: _toggleZenMode,
-                              theme: theme,
-                              tooltip: _isZenMode
-                                  ? 'Disable Zen Mode'
-                                  : 'Enable Zen Mode',
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 20),
-
-                    // ── Session Summary (appears on splash after a session) ─
-                    if (isStart) _buildSessionSummary(theme),
+                          // ── Session Summary (appears on splash after a session) ─
+                          if (isStart) _buildSessionSummary(theme),
 
                     // ── Glassmorphic Main Panel ───────────────────────────
                     Container(
@@ -1566,7 +1484,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                         ),
                       ),
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 36),
 
                     // ── Controls Row ────────────────────────────────────────
                     Wrap(
@@ -1801,6 +1719,108 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           ],
         ),
       ),
+    );
+  }
+
+  // ── Instructions Modal ────────────────────────────────────────────────
+  void _showInstructionsModal(BuildContext context, GameTheme theme) {
+    HapticFeedback.selectionClick();
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withValues(alpha: 0.75),
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 420),
+            decoration: BoxDecoration(
+              color: theme.panelBg,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: theme.panelBorder, width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  blurRadius: 32,
+                  offset: const Offset(0, 12),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+                child: Padding(
+                  padding: const EdgeInsets.all(22.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.help_outline_rounded,
+                                  color: theme.accentColor, size: 24),
+                              const SizedBox(width: 8),
+                              Text(
+                                'HOW TO PLAY',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 2.0,
+                                  color: theme.textPrimary,
+                                ),
+                              ),
+                            ],
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            icon: Icon(Icons.close_rounded,
+                                color: theme.textPrimary.withValues(alpha: 0.6)),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      const Divider(height: 1, color: Colors.white12),
+                      const SizedBox(height: 16),
+                      _buildInstruction('✦', 'Watch the tiles flash in sequence', theme),
+                      _buildInstruction('✦', 'Replicate the pattern by tapping', theme),
+                      _buildInstruction('✦', 'Each round adds one more step', theme),
+                      _buildInstruction('✦', '1 Free Hint per level + Direct Rewarded Ad', theme),
+                      _buildInstruction('✦', 'No punishment — just keep going & stay focused!', theme),
+                      const SizedBox(height: 20),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: theme.accentColor,
+                            foregroundColor: Colors.black87,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                          ),
+                          child: const Text(
+                            'GOT IT!',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 1.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 
