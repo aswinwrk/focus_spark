@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'services/audio_service.dart';
 
 void main() async {
@@ -196,7 +197,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Particle Engine ──────────────────────────────────────────────────────
   late ParticleManager _particleManager;
-
+  int _splashStage = 0;
   late SharedPreferences _prefs;
   final math.Random _random = math.Random();
 
@@ -1211,6 +1212,32 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     final screenWidth = MediaQuery.of(context).size.width;
     final horizontalPadding = screenWidth < 360 ? 10.0 : 18.0;
 
+    if (_splashStage == 0) {
+      return _CompanySplashScreen(
+        theme: theme,
+        onComplete: () {
+          if (mounted) {
+            setState(() {
+              _splashStage = 1;
+            });
+          }
+        },
+      );
+    }
+
+    if (_splashStage == 1) {
+      return _FullScreenSplashScreen(
+        theme: theme,
+        onLoadingComplete: () {
+          if (mounted) {
+            setState(() {
+              _splashStage = 2;
+            });
+          }
+        },
+      );
+    }
+
     return Scaffold(
       body: AnimatedGradientBackground(
         colors: theme.bgGradient,
@@ -1484,7 +1511,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                         ),
                       ),
                     ),
-                    const SizedBox(height: 36),
+                    const SizedBox(height: 56),
 
                     // ── Controls Row ────────────────────────────────────────
                     Wrap(
@@ -3010,6 +3037,535 @@ class LeaderboardEntry {
       date: json['date'] != null
           ? DateTime.tryParse(json['date'] as String) ?? DateTime.now()
           : DateTime.now(),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1: Full-Screen Company Logo Splash Screen
+// ---------------------------------------------------------------------------
+class _CompanySplashScreen extends StatefulWidget {
+  final GameTheme theme;
+  final VoidCallback onComplete;
+
+  const _CompanySplashScreen({
+    required this.theme,
+    required this.onComplete,
+  });
+
+  @override
+  State<_CompanySplashScreen> createState() => _CompanySplashScreenState();
+}
+
+class _CompanySplashScreenState extends State<_CompanySplashScreen>
+    with TickerProviderStateMixin {
+  late AnimationController _fadeController;
+  late Animation<double> _fadeAnimation;
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
+  late Animation<double> _rotationAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _fadeController = AnimationController(
+      duration: const Duration(milliseconds: 2000),
+      vsync: this,
+    );
+    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _fadeController, curve: Curves.easeInOut),
+    );
+
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 2400),
+      vsync: this,
+    )..repeat(reverse: true);
+
+    _pulseAnimation = Tween<double>(begin: 0.92, end: 1.08).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+    _rotationAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(_pulseController);
+
+    _fadeController.forward();
+    Timer(const Duration(milliseconds: 2200), () {
+      if (mounted) {
+        widget.onComplete();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _fadeController.dispose();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedGradientBackground(
+      colors: widget.theme.bgGradient,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: FadeTransition(
+          opacity: _fadeAnimation,
+          child: SafeArea(
+            child: Stack(
+              children: [
+                // Ambient center radial glow
+                Center(
+                  child: Container(
+                    width: 320,
+                    height: 320,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: RadialGradient(
+                        colors: [
+                          widget.theme.accentColor.withValues(alpha: 0.25),
+                          widget.theme.accentColor.withValues(alpha: 0.05),
+                          Colors.transparent,
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+                Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // Company Logo Shield Emblem
+                      AnimatedBuilder(
+                        animation: _pulseController,
+                        builder: (context, child) {
+                          return Transform.scale(
+                            scale: _pulseAnimation.value,
+                            child: Container(
+                              width: 120,
+                              height: 120,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(32),
+                                color: widget.theme.panelBg.withValues(alpha: 0.6),
+                                border: Border.all(
+                                  color: widget.theme.accentColor.withValues(alpha: 0.8),
+                                  width: 2.5,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: widget.theme.accentColor.withValues(alpha: 0.5),
+                                    blurRadius: 36,
+                                    spreadRadius: 6,
+                                  ),
+                                ],
+                              ),
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  Transform.rotate(
+                                    angle: _rotationAnimation.value * 6.28,
+                                    child: Container(
+                                      width: 98,
+                                      height: 98,
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(24),
+                                        border: Border.all(
+                                          color: widget.theme.tileActiveGlow.withValues(alpha: 0.45),
+                                          width: 1.5,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Icon(
+                                    Icons.auto_awesome_mosaic_rounded,
+                                    size: 52,
+                                    color: widget.theme.accentColor,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 36),
+
+                      // Company Name
+                      Text(
+                        'MINDFUL MATRIX',
+                        style: GoogleFonts.orbitron(
+                          fontSize: 26,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 5.0,
+                          color: widget.theme.textPrimary,
+                          shadows: [
+                            Shadow(
+                              color: widget.theme.accentColor.withValues(alpha: 0.7),
+                              blurRadius: 24,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+
+                      // Subtitle
+                      Text(
+                        'INTERACTIVE STUDIOS',
+                        style: GoogleFonts.spaceGrotesk(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 4.0,
+                          color: widget.theme.accentColor.withValues(alpha: 0.85),
+                        ),
+                      ),
+                      const SizedBox(height: 60),
+
+                      // Footer Presenter Tag
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: widget.theme.tileDefault.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: widget.theme.panelBorder.withValues(alpha: 0.3),
+                            width: 1,
+                          ),
+                        ),
+                        child: Text(
+                          'P R E S E N T S',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 4.5,
+                            color: widget.theme.textPrimary.withValues(alpha: 0.6),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: Full-Screen Game Launch Splash Screen with Progress Loading Bar
+// ---------------------------------------------------------------------------
+class _FullScreenSplashScreen extends StatefulWidget {
+  final GameTheme theme;
+  final VoidCallback onLoadingComplete;
+
+  const _FullScreenSplashScreen({
+    required this.theme,
+    required this.onLoadingComplete,
+  });
+
+  @override
+  State<_FullScreenSplashScreen> createState() => _FullScreenSplashScreenState();
+}
+
+class _FullScreenSplashScreenState extends State<_FullScreenSplashScreen>
+    with TickerProviderStateMixin {
+  late AnimationController _progressController;
+  late Animation<double> _progressAnimation;
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
+  late Animation<double> _rotationAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _progressController = AnimationController(
+      duration: const Duration(milliseconds: 3000),
+      vsync: this,
+    );
+    _progressAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _progressController, curve: Curves.easeInOutCubic),
+    );
+
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 2800),
+      vsync: this,
+    )..repeat(reverse: true);
+
+    _pulseAnimation = Tween<double>(begin: 0.90, end: 1.10).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
+    _rotationAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(_pulseController);
+
+    _progressController.forward();
+    _progressController.addStatusListener((status) {
+      if (status == AnimationStatus.completed) {
+        widget.onLoadingComplete();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _progressController.dispose();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedGradientBackground(
+      colors: widget.theme.bgGradient,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: SafeArea(
+          child: Stack(
+            children: [
+              // Ambient background spark glow
+              Center(
+                child: Container(
+                  width: 280,
+                  height: 280,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(
+                      colors: [
+                        widget.theme.accentColor.withValues(alpha: 0.22),
+                        widget.theme.accentColor.withValues(alpha: 0.05),
+                        Colors.transparent,
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+
+              Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // Studio Branding Tag Badge
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: widget.theme.accentColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: widget.theme.accentColor.withValues(alpha: 0.4),
+                            width: 1,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: widget.theme.accentColor.withValues(alpha: 0.15),
+                              blurRadius: 12,
+                            ),
+                          ],
+                        ),
+                        child: Text(
+                          '✦ MINDFUL MATRIX STUDIOS ✦',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 3.5,
+                            color: widget.theme.accentColor,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 32),
+
+                      // Dedicated Splash Cosmic Spark Emblem
+                      AnimatedBuilder(
+                        animation: _pulseController,
+                        builder: (context, child) {
+                          return Transform.scale(
+                            scale: _pulseAnimation.value,
+                            child: Container(
+                              width: 110,
+                              height: 110,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: widget.theme.panelBg.withValues(alpha: 0.6),
+                                border: Border.all(
+                                  color: widget.theme.accentColor.withValues(alpha: 0.7),
+                                  width: 2,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: widget.theme.accentColor.withValues(alpha: 0.5),
+                                    blurRadius: 28,
+                                    spreadRadius: 4,
+                                  ),
+                                ],
+                              ),
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  // Rotating energy ring
+                                  Transform.rotate(
+                                    angle: _rotationAnimation.value * 6.28,
+                                    child: Container(
+                                      width: 92,
+                                      height: 92,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                          color: widget.theme.tileActiveGlow.withValues(alpha: 0.4),
+                                          width: 1.5,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Icon(
+                                    Icons.auto_awesome_rounded,
+                                    size: 48,
+                                    color: widget.theme.accentColor,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 32),
+
+                      // Gradient Shader Futuristic Orbitron Title Text
+                      ShaderMask(
+                        shaderCallback: (bounds) => LinearGradient(
+                          colors: [
+                            Colors.white,
+                            widget.theme.accentColor,
+                            widget.theme.tileActiveGlow,
+                          ],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ).createShader(bounds),
+                        child: Text(
+                          'FOCUS SPARK',
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.orbitron(
+                            fontSize: 34,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 6.0,
+                            color: Colors.white,
+                            shadows: [
+                              Shadow(
+                                color: widget.theme.accentColor.withValues(alpha: 0.8),
+                                blurRadius: 28,
+                              ),
+                              Shadow(
+                                color: widget.theme.accentColor.withValues(alpha: 0.4),
+                                blurRadius: 52,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+
+                      // Subtitle Tagline Badge
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: widget.theme.tileDefault.withValues(alpha: 0.25),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: widget.theme.panelBorder.withValues(alpha: 0.3),
+                            width: 1,
+                          ),
+                        ),
+                        child: Text(
+                          'ELEVATE YOUR MEMORY & FOCUS',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 2.8,
+                            color: widget.theme.textPrimary.withValues(alpha: 0.75),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 48),
+
+                      // Animated Progress Loading Bar
+                      AnimatedBuilder(
+                        animation: _progressAnimation,
+                        builder: (context, child) {
+                          final progress = _progressAnimation.value;
+                          final percent = (progress * 100).toInt();
+
+                          return Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 240,
+                                height: 8,
+                                decoration: BoxDecoration(
+                                  color: widget.theme.tileDefault.withValues(alpha: 0.35),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(
+                                    color: widget.theme.panelBorder.withValues(alpha: 0.4),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(4),
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: FractionallySizedBox(
+                                      widthFactor: progress,
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(
+                                            colors: [
+                                              widget.theme.accentColor,
+                                              widget.theme.tileActiveGlow,
+                                            ],
+                                          ),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: widget.theme.accentColor.withValues(alpha: 0.85),
+                                              blurRadius: 10,
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: widget.theme.panelBg.withValues(alpha: 0.5),
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: widget.theme.panelBorder.withValues(alpha: 0.4),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: Text(
+                                  'INITIALIZING MATRIX... $percent%',
+                                  style: GoogleFonts.orbitron(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 2.2,
+                                    color: widget.theme.accentColor,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
