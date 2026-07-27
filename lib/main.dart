@@ -3,11 +3,14 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'services/audio_service.dart';
+import 'services/ad_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -19,6 +22,7 @@ void main() async {
   await SystemChrome.setEnabledSystemUIMode(
     SystemUiMode.immersiveSticky,
   );
+  await AdService.instance.initialize();
 
   runApp(const FocusSparkApp());
 }
@@ -195,11 +199,14 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   double _totalInputTime = 8.0;
   double _elapsedInputTime = 0.0;
 
-  // ── Particle Engine ──────────────────────────────────────────────────────
+  // ── Particle & Ad Engine ──────────────────────────────────────────────────
   late ParticleManager _particleManager;
   int _splashStage = 0;
   late SharedPreferences _prefs;
   final math.Random _random = math.Random();
+  BannerAd? _bannerAd;
+  bool _isBannerAdLoaded = false;
+  String _activeAdType = 'REWARDED VIDEO TEST AD';
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
   @override
@@ -207,10 +214,32 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     super.initState();
     _particleManager = ParticleManager(this);
     _loadSettings();
+    _initAdMobBanner();
+  }
+
+  void _initAdMobBanner() async {
+    _bannerAd = await AdService.instance.createBannerAd(
+      onAdLoaded: (ad) {
+        if (mounted) setState(() => _isBannerAdLoaded = true);
+      },
+      onAdFailedToLoad: (ad, error) {
+        ad.dispose();
+        if (mounted) {
+          setState(() => _isBannerAdLoaded = false);
+          // Retry loading banner ad after 4 seconds
+          Timer(const Duration(seconds: 4), () {
+            if (mounted && !_isBannerAdLoaded) {
+              _initAdMobBanner();
+            }
+          });
+        }
+      },
+    );
   }
 
   @override
   void dispose() {
+    _bannerAd?.dispose();
     _particleManager.disposeTicker();
     _particleManager.dispose();
     _cancelInputTimer();
@@ -372,6 +401,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Session Control ──────────────────────────────────────────────────────
   void _startSession() async {
+    final shown = await AdService.instance.showInterstitialAdOrLoad();
+    if (!shown && kIsWeb) {
+      _showTestInterstitialOverlay();
+    }
     _cancelInputTimer();
     _particleManager.clear();
     _playbackSessionId++;
@@ -586,16 +619,51 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
   }
 
-  void _playDirectRewardedAd() async {
+  void _showTestInterstitialOverlay() async {
     if (_isAdActive) return;
     _cancelInputTimer();
     HapticFeedback.mediumImpact();
 
     setState(() {
       _isAdActive = true;
+      _activeAdType = 'INTERSTITIAL TEST AD';
     });
 
-    // Simulate direct rewarded video ad playback (3s)
+    await Future.delayed(const Duration(milliseconds: 2500));
+
+    if (!mounted) return;
+
+    setState(() {
+      _isAdActive = false;
+    });
+
+    if (_gameState == GameState.playerInput) {
+      _startInputTimer();
+    }
+  }
+
+  void _playDirectRewardedAd() async {
+    if (_isAdActive) return;
+    _cancelInputTimer();
+    HapticFeedback.mediumImpact();
+
+    final shown = await AdService.instance.showRewardedAdOrLoad(
+      onUserEarnedReward: (reward) {
+        if (_gameState == GameState.playerInput && mounted) {
+          _startInputTimer();
+          _triggerHint();
+        }
+      },
+    );
+
+    if (shown) return;
+
+    // Fallback visible test ad overlay for rewarded ad
+    setState(() {
+      _isAdActive = true;
+      _activeAdType = 'REWARDED VIDEO TEST AD';
+    });
+
     await Future.delayed(const Duration(milliseconds: 3000));
 
     if (!mounted) return;
@@ -612,44 +680,120 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   Widget _buildDirectAdOverlay(GameTheme theme) {
     if (!_isAdActive) return const SizedBox.shrink();
+    final isRewarded = _activeAdType.contains('REWARDED');
+
     return Positioned.fill(
       child: Container(
-        color: Colors.black.withValues(alpha: 0.92),
+        color: Colors.black.withValues(alpha: 0.94),
         child: Center(
           child: Padding(
-            padding: const EdgeInsets.all(20.0),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.ondemand_video_rounded, color: theme.accentColor, size: 52),
-                const SizedBox(height: 14),
-                Text(
-                  'REWARDED AD PLAYING',
-                  style: TextStyle(
-                    color: theme.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 2.0,
-                  ),
+            padding: const EdgeInsets.all(24.0),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+              decoration: BoxDecoration(
+                color: theme.panelBg,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: const Color(0xFF4285F4).withValues(alpha: 0.6),
+                  width: 1.5,
                 ),
-                const SizedBox(height: 6),
-                Text(
-                  'Revealing extra hint upon completion...',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: theme.textPrimary.withValues(alpha: 0.6),
-                    fontSize: 12,
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF4285F4).withValues(alpha: 0.3),
+                    blurRadius: 32,
                   ),
-                ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  width: 140,
-                  child: LinearProgressIndicator(
-                    color: theme.accentColor,
-                    backgroundColor: theme.tileDefault,
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Google AdMob Test Ad Header Tag
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFEA4335),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text(
+                          'Ad',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Google AdMob Test Ad',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1.0,
+                          color: theme.textPrimary.withValues(alpha: 0.85),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-              ],
+                  const SizedBox(height: 20),
+
+                  // Center Ad Icon
+                  Icon(
+                    isRewarded ? Icons.ondemand_video_rounded : Icons.branding_watermark_rounded,
+                    color: const Color(0xFF4285F4),
+                    size: 48,
+                  ),
+                  const SizedBox(height: 16),
+
+                  Text(
+                    _activeAdType,
+                    style: TextStyle(
+                      color: theme.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 2.0,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    isRewarded
+                        ? 'Watching Test Video... Reward: +1 Free Hint'
+                        : 'Google Test Interstitial Ad View',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: theme.textPrimary.withValues(alpha: 0.65),
+                      fontSize: 11,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Progress loading indicator
+                  const SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF4285F4)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Ad Unit ID Subtitle
+                  Text(
+                    isRewarded
+                        ? 'Unit ID: ca-app-pub-3940256099942544/5224354917'
+                        : 'Unit ID: ca-app-pub-3940256099942544/1033173712',
+                    style: TextStyle(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w600,
+                      color: theme.textPrimary.withValues(alpha: 0.4),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -737,6 +881,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       if (_playerInput.length == _sequence.length) {
         // SUCCESS
         _cancelInputTimer();
+        final completedLevel = _level;
         setState(() {
           _gameState = GameState.successTransition;
           _currentStreak++;
@@ -750,6 +895,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         });
         if (_level > _highScore) _updateHighScore(_level);
         _recordLeaderboardScore(_level, _currentStreak);
+
+        // Custom Interstitial Ad Frequency Rule
+        if (AdService.shouldShowInterstitialOnLevelComplete(completedLevel)) {
+          AdService.instance.showInterstitialAdOrLoad();
+        }
 
         HapticFeedback.mediumImpact();
         Future.delayed(const Duration(milliseconds: 80), () => HapticFeedback.mediumImpact());
@@ -1725,26 +1875,32 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         ),
       ),
       child: Center(
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.subtitles_outlined,
-              size: 15,
-              color: theme.textPrimary.withValues(alpha: 0.35),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              'BANNER AD SPACE',
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 1.6,
-                color: theme.textPrimary.withValues(alpha: 0.35),
+        child: _isBannerAdLoaded && _bannerAd != null
+            ? SizedBox(
+                width: _bannerAd!.size.width.toDouble(),
+                height: _bannerAd!.size.height.toDouble(),
+                child: AdWidget(ad: _bannerAd!),
+              )
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.subtitles_outlined,
+                    size: 15,
+                    color: theme.textPrimary.withValues(alpha: 0.35),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'BANNER AD SPACE',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 1.6,
+                      color: theme.textPrimary.withValues(alpha: 0.35),
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
-        ),
       ),
     );
   }

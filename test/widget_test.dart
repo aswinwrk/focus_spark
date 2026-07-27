@@ -10,6 +10,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:focus_spark/main.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   testWidgets('Two-stage splash loading and home screen transition smoke test', (WidgetTester tester) async {
     // Build our app and trigger a frame.
     await tester.pumpWidget(const FocusSparkApp());
