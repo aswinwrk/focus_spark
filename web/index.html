@@ -18,7 +18,7 @@
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+  <meta name="description" content="Focus Spark - Mindful Matrix Memory Game">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
@@ -29,20 +29,43 @@
   <!-- Favicon -->
   <link rel="icon" type="image/png" href="favicon.png"/>
 
-  <title>focus_spark</title>
+  <title>Focus Spark</title>
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
   <script>
+    window.ambientMusicEnabled = true;
+
+    window.initAudio = function() {
+      if (!window.audioCtx) {
+        window.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (!window.masterMusicGain && window.audioCtx) {
+        window.masterMusicGain = window.audioCtx.createGain();
+        window.masterMusicGain.connect(window.audioCtx.destination);
+      }
+      if (window.audioCtx.state === 'suspended') {
+        window.audioCtx.resume().then(function() {
+          if (window.ambientMusicEnabled && !window.ambientTimer) {
+            window.startAmbientMusic();
+          }
+        }).catch(function(_) {});
+      }
+    };
+
+    // Auto-unlock audio engine immediately on page load, mouse movement over splash, focus, or touch
+    ['DOMContentLoaded', 'load', 'mousemove', 'pointermove', 'touchstart', 'focus', 'click'].forEach(function(evt) {
+      window.addEventListener(evt, function() {
+        window.initAudio();
+        if (window.ambientMusicEnabled && (!window.ambientTimer || (window.audioCtx && window.audioCtx.state === 'suspended'))) {
+          window.startAmbientMusic();
+        }
+      }, { passive: true });
+    });
+
     window.playSparkTone = function(frequency, duration) {
       try {
-        if (!window.audioCtx) {
-          window.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        if (window.audioCtx.state === 'suspended') {
-          window.audioCtx.resume();
-        }
-        
+        window.initAudio();
         const osc = window.audioCtx.createOscillator();
         const gainNode = window.audioCtx.createGain();
         
@@ -53,7 +76,7 @@
         osc.frequency.setValueAtTime(frequency, window.audioCtx.currentTime);
         
         // Attack-Decay envelope
-        gainNode.gain.setValueAtTime(0, window.audioCtx.currentTime);
+        gainNode.gain.setValueAtTime(0.001, window.audioCtx.currentTime);
         gainNode.gain.linearRampToValueAtTime(0.25, window.audioCtx.currentTime + 0.02);
         gainNode.gain.exponentialRampToValueAtTime(0.0001, window.audioCtx.currentTime + duration);
         
@@ -61,6 +84,143 @@
         osc.stop(window.audioCtx.currentTime + duration);
       } catch (e) {
         console.error("Web Audio API error: ", e);
+      }
+    };
+
+    window.startAmbientMusic = function() {
+      try {
+        window.ambientMusicEnabled = true;
+        window.initAudio();
+        if (window.audioCtx && window.audioCtx.state === 'suspended') {
+          window.audioCtx.resume().catch(function(_) {});
+        }
+        if (window.ambientTimer) return;
+
+        // Soft 4-second exponential master volume fade-in from zero volume
+        if (window.masterMusicGain && window.audioCtx) {
+          window.masterMusicGain.gain.setValueAtTime(0.0001, window.audioCtx.currentTime);
+          window.masterMusicGain.gain.exponentialRampToValueAtTime(0.85, window.audioCtx.currentTime + 4.0);
+        }
+
+        // Upbeat Dual-Harmony Arcade Electro Melody (C Major -> G Major -> A Minor -> F Major) - 142 BPM
+        const melody = [
+          // Bar 1: C Major (C5, E5, G5, C6)
+          { note: 523.25, harm: 329.63, bass: 130.81 }, { note: 659.25, harm: 392.00, bass: null },
+          { note: 783.99, harm: 523.25, bass: 130.81 }, { note: 1046.50, harm: 659.25, bass: null },
+          { note: 783.99, harm: 523.25, bass: 130.81 }, { note: 659.25, harm: 392.00, bass: null },
+          { note: 783.99, harm: 523.25, bass: 130.81 }, { note: 1046.50, harm: 659.25, bass: null },
+
+          // Bar 2: G Major (G4, B4, D5, G5)
+          { note: 392.00, harm: 246.94, bass: 98.00 },  { note: 493.88, harm: 293.66, bass: null },
+          { note: 587.33, harm: 392.00, bass: 98.00 },  { note: 783.99, harm: 493.88, bass: null },
+          { note: 587.33, harm: 392.00, bass: 98.00 },  { note: 493.88, harm: 293.66, bass: null },
+          { note: 587.33, harm: 392.00, bass: 98.00 },  { note: 783.99, harm: 493.88, bass: null },
+
+          // Bar 3: A Minor (A4, C5, E5, A5)
+          { note: 440.00, harm: 261.63, bass: 110.00 }, { note: 523.25, harm: 329.63, bass: null },
+          { note: 659.25, harm: 440.00, bass: 110.00 }, { note: 880.00, harm: 523.25, bass: null },
+          { note: 659.25, harm: 440.00, bass: 110.00 }, { note: 523.25, harm: 329.63, bass: null },
+          { note: 659.25, harm: 440.00, bass: 110.00 }, { note: 880.00, harm: 523.25, bass: null },
+
+          // Bar 4: F Major (F4, A4, C5, F5)
+          { note: 349.23, harm: 220.00, bass: 87.31 },  { note: 440.00, harm: 261.63, bass: null },
+          { note: 523.25, harm: 349.23, bass: 87.31 },  { note: 698.46, harm: 440.00, bass: null },
+          { note: 523.25, harm: 349.23, bass: 87.31 },  { note: 440.00, harm: 261.63, bass: null },
+          { note: 523.25, harm: 349.23, bass: 87.31 },  { note: 698.46, harm: 440.00, bass: null }
+        ];
+
+        let stepIndex = 0;
+
+        function playElectroStep() {
+          if (!window.ambientTimer) return;
+          const step = melody[stepIndex];
+          stepIndex = (stepIndex + 1) % melody.length;
+
+          try {
+            // Upbeat Lead Synth Tone
+            const osc = window.audioCtx.createOscillator();
+            const filter = window.audioCtx.createBiquadFilter();
+            const gainNode = window.audioCtx.createGain();
+
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(step.note, window.audioCtx.currentTime);
+
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(1200, window.audioCtx.currentTime);
+
+            gainNode.gain.setValueAtTime(0.001, window.audioCtx.currentTime);
+            gainNode.gain.linearRampToValueAtTime(0.038, window.audioCtx.currentTime + 0.015);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, window.audioCtx.currentTime + 0.19);
+
+            osc.connect(filter);
+            filter.connect(gainNode);
+            gainNode.connect(window.masterMusicGain || window.audioCtx.destination);
+
+            osc.start(window.audioCtx.currentTime);
+            osc.stop(window.audioCtx.currentTime + 0.19);
+
+            // Harmony Voice
+            if (step.harm) {
+              const harmOsc = window.audioCtx.createOscillator();
+              const harmGain = window.audioCtx.createGain();
+
+              harmOsc.type = 'sine';
+              harmOsc.frequency.setValueAtTime(step.harm, window.audioCtx.currentTime);
+
+              harmGain.gain.setValueAtTime(0.001, window.audioCtx.currentTime);
+              harmGain.gain.linearRampToValueAtTime(0.022, window.audioCtx.currentTime + 0.015);
+              harmGain.gain.exponentialRampToValueAtTime(0.0001, window.audioCtx.currentTime + 0.19);
+
+              harmOsc.connect(filter);
+              filter.connect(harmGain);
+              harmGain.connect(window.masterMusicGain || window.audioCtx.destination);
+
+              harmOsc.start(window.audioCtx.currentTime);
+              harmOsc.stop(window.audioCtx.currentTime + 0.19);
+            }
+
+            // Bouncy Sub-Bass Pulse
+            if (step.bass) {
+              const bassOsc = window.audioCtx.createOscillator();
+              const bassGain = window.audioCtx.createGain();
+
+              bassOsc.type = 'triangle';
+              bassOsc.frequency.setValueAtTime(step.bass, window.audioCtx.currentTime);
+
+              bassGain.gain.setValueAtTime(0.001, window.audioCtx.currentTime);
+              bassGain.gain.linearRampToValueAtTime(0.055, window.audioCtx.currentTime + 0.015);
+              bassGain.gain.exponentialRampToValueAtTime(0.0001, window.audioCtx.currentTime + 0.22);
+
+              bassOsc.connect(bassGain);
+              bassGain.connect(window.masterMusicGain || window.audioCtx.destination);
+
+              bassOsc.start(window.audioCtx.currentTime);
+              bassOsc.stop(window.audioCtx.currentTime + 0.22);
+            }
+          } catch (_) {}
+        }
+
+        playElectroStep();
+        window.ambientTimer = setInterval(playElectroStep, 210);
+      } catch (e) {
+        console.error("Magic Tiles music error: ", e);
+      }
+    };
+
+    window.stopAmbientMusic = function() {
+      try {
+        window.ambientMusicEnabled = false;
+        if (window.masterMusicGain && window.audioCtx) {
+          window.masterMusicGain.gain.linearRampToValueAtTime(0.0001, window.audioCtx.currentTime + 0.5);
+        }
+        setTimeout(function() {
+          if (window.ambientTimer) {
+            clearInterval(window.ambientTimer);
+            window.ambientTimer = null;
+          }
+        }, 500);
+      } catch (e) {
+        console.error("Stop ambient music error: ", e);
       }
     };
   </script>

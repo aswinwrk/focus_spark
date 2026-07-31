@@ -16,17 +16,30 @@ class NativeAudioService implements AudioService {
     _playAsync(frequency, durationSeconds);
   }
 
-  Future<void> _playAsync(double frequency, double durationSeconds) async {
+  @override
+  void startAmbientMusic() {
+    _invokeChannel('startAmbientMusic');
+  }
+
+  @override
+  void stopAmbientMusic() {
+    _invokeChannel('stopAmbientMusic');
+  }
+
+  Future<void> _invokeChannel(String method, [Map<String, dynamic>? args]) async {
     try {
-      await _channel.invokeMethod<void>('playTone', {
-        'frequency': frequency,
-        'duration': durationSeconds,
-      });
+      await _channel.invokeMethod<void>(method, args);
     } on MissingPluginException {
-      // Running on a platform without the native implementation (desktop/test)
-      debugPrint('NativeAudioService: no native plugin on this platform.');
+      debugPrint('NativeAudioService: no native plugin for $method on this platform.');
     } catch (e) {
-      debugPrint('NativeAudioService: playTone($frequency) error: $e');
+      debugPrint('NativeAudioService: $method error: $e');
     }
+  }
+
+  Future<void> _playAsync(double frequency, double durationSeconds) async {
+    _invokeChannel('playTone', {
+      'frequency': frequency,
+      'duration': durationSeconds,
+    });
   }
 }

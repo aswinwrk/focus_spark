@@ -5,6 +5,12 @@ import 'audio_service.dart';
 @JS('window.playSparkTone')
 external void _playSparkTone(double frequency, double duration);
 
+@JS('window.startAmbientMusic')
+external void _startAmbientMusicJS();
+
+@JS('window.stopAmbientMusic')
+external void _stopAmbientMusicJS();
+
 AudioService getAudioService() => WebAudioService();
 
 class WebAudioService implements AudioService {
@@ -14,6 +20,24 @@ class WebAudioService implements AudioService {
       _playSparkTone(frequency, durationSeconds);
     } catch (e) {
       debugPrint('WebAudioService playTone error: $e');
+    }
+  }
+
+  @override
+  void startAmbientMusic() {
+    try {
+      _startAmbientMusicJS();
+    } catch (e) {
+      debugPrint('WebAudioService startAmbientMusic error: $e');
+    }
+  }
+
+  @override
+  void stopAmbientMusic() {
+    try {
+      _stopAmbientMusicJS();
+    } catch (e) {
+      debugPrint('WebAudioService stopAmbientMusic error: $e');
     }
   }
 }

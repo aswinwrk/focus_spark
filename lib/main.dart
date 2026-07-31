@@ -180,7 +180,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   bool _showTutorialCard = true;
 
   bool _isZenMode = false;
-  bool _isMuted = false;
+  bool _isMusicMuted = false;
+  bool _isSfxMuted = false;
 
   // ── Tile Interaction State ───────────────────────────────────────────────
   int? _activePlaybackTile;
@@ -270,7 +271,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     setState(() {
       _highScore = _prefs.getInt('focus_spark_high_score') ?? 0;
       _isZenMode = _prefs.getBool('focus_spark_zen_mode') ?? false;
-      _isMuted = _prefs.getBool('focus_spark_is_muted') ?? false;
+      _isMusicMuted = _prefs.getBool('focus_spark_is_music_muted') ?? false;
+      _isSfxMuted = _prefs.getBool('focus_spark_is_sfx_muted') ?? false;
       _selectedThemeIndex = _prefs.getInt('focus_spark_theme_index') ?? 0;
       _hasSeenTutorial = _prefs.getBool('focus_spark_has_seen_tutorial') ?? false;
       _showTutorialCard = !_hasSeenTutorial;
@@ -291,6 +293,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       if (_level > _highScore) {
         _highScore = _level;
         _prefs.setInt('focus_spark_high_score', _highScore);
+      }
+
+      if (!_isMusicMuted) {
+        AudioService.instance.startAmbientMusic();
+      } else {
+        AudioService.instance.stopAmbientMusic();
       }
 
       // Load Hall of Fame Leaderboard
@@ -371,9 +379,25 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     await _prefs.setBool('focus_spark_zen_mode', _isZenMode);
   }
 
-  Future<void> _toggleMute() async {
-    setState(() => _isMuted = !_isMuted);
-    await _prefs.setBool('focus_spark_is_muted', _isMuted);
+  Future<void> _toggleMusic() async {
+    HapticFeedback.selectionClick();
+    setState(() {
+      _isMusicMuted = !_isMusicMuted;
+    });
+    await _prefs.setBool('focus_spark_is_music_muted', _isMusicMuted);
+    if (_isMusicMuted) {
+      AudioService.instance.stopAmbientMusic();
+    } else {
+      AudioService.instance.startAmbientMusic();
+    }
+  }
+
+  void _toggleSfx() async {
+    HapticFeedback.selectionClick();
+    setState(() {
+      _isSfxMuted = !_isSfxMuted;
+    });
+    await _prefs.setBool('focus_spark_is_sfx_muted', _isSfxMuted);
   }
 
   Future<void> _selectTheme(int index) async {
@@ -503,7 +527,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       final theme = _themes[_selectedThemeIndex];
       _spawnTileSparks(tileIndex, theme.tileActiveGlow.withValues(alpha: 0.35));
 
-      if (!_isMuted) {
+      if (!_isSfxMuted) {
         AudioService.instance.playTone(_frequencies[tileIndex], activeMs / 1000.0);
       }
 
@@ -561,7 +585,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _hintedTile = null;
     });
     HapticFeedback.vibrate();
-    if (!_isMuted) AudioService.instance.playTone(130.81, 0.4);
+    if (!_isSfxMuted) AudioService.instance.playTone(130.81, 0.4);
 
     Future.delayed(const Duration(milliseconds: 1200), () {
       if (mounted && _gameState == GameState.errorTransition) {
@@ -906,9 +930,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
         _spawnSuccessSparks(theme.accentColor);
 
-        if (!_isMuted) {
-          // Play a rising success arpeggio
-          AudioService.instance.playTone(523.25, 0.18);
+        if (!_isSfxMuted) {
+          final frequency = _frequencies[clickedIndex];
+          AudioService.instance.playTone(frequency, 0.25);
           Future.delayed(const Duration(milliseconds: 120),
               () => AudioService.instance.playTone(587.33, 0.22));
         }
@@ -934,7 +958,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       });
       _saveGameProgress();
       HapticFeedback.vibrate();
-      if (!_isMuted) AudioService.instance.playTone(130.81, 0.4);
+      if (!_isSfxMuted) AudioService.instance.playTone(130.81, 0.4);
 
       Future.delayed(const Duration(milliseconds: 1200), () {
         if (mounted && _gameState == GameState.errorTransition) {
@@ -1046,7 +1070,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
               setState(() => _activeTapTile = index);
               _spawnTileSparks(index, theme.tileActiveGlow);
               HapticFeedback.selectionClick();
-              if (!_isMuted) {
+              if (!_isSfxMuted) {
                 AudioService.instance.playTone(_frequencies[index], 0.22);
               }
             }
@@ -1383,6 +1407,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             setState(() {
               _splashStage = 2;
             });
+            if (!_isMusicMuted) {
+              AudioService.instance.startAmbientMusic();
+            }
           }
         },
       );
@@ -1433,15 +1460,27 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                           const SizedBox(width: 4),
                         ],
 
-                        // 2. Sound Toggle Button
+                        // 2a. Ambient Music Toggle Button
                         _buildIconToggle(
-                          icon: _isMuted
+                          icon: _isMusicMuted
+                              ? Icons.music_off_rounded
+                              : Icons.music_note_rounded,
+                          isActive: !_isMusicMuted,
+                          onTap: _toggleMusic,
+                          theme: theme,
+                          tooltip: _isMusicMuted ? 'Enable Music' : 'Mute Music',
+                        ),
+                        const SizedBox(width: 4),
+
+                        // 2b. Sound Effects (SFX) Toggle Button
+                        _buildIconToggle(
+                          icon: _isSfxMuted
                               ? Icons.volume_off_outlined
                               : Icons.volume_up_outlined,
-                          isActive: !_isMuted,
-                          onTap: _toggleMute,
+                          isActive: !_isSfxMuted,
+                          onTap: _toggleSfx,
                           theme: theme,
-                          tooltip: _isMuted ? 'Unmute' : 'Mute',
+                          tooltip: _isSfxMuted ? 'Enable SFX' : 'Mute SFX',
                         ),
                         const SizedBox(width: 4),
 
