@@ -209,13 +209,30 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   bool _isBannerAdLoaded = false;
   String _activeAdType = 'REWARDED VIDEO TEST AD';
 
-  // ── Lifecycle ────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
     _particleManager = ParticleManager(this);
     _loadSettings();
     _initAdMobBanner();
+
+    AdService.instance.onAdOpened = () {
+      if (!mounted) return;
+      AudioService.instance.stopAmbientMusic();
+      _cancelInputTimer();
+      if (_gameState == GameState.playerInput) {
+        setState(() {
+          _gameState = GameState.paused;
+        });
+      }
+    };
+
+    AdService.instance.onAdClosed = () {
+      if (!mounted) return;
+      if (!_isMusicMuted) {
+        AudioService.instance.startAmbientMusic();
+      }
+    };
   }
 
   void _initAdMobBanner() async {
@@ -290,8 +307,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _sequence.clear();
       }
 
-      if (_level > _highScore) {
-        _highScore = _level;
+      final clearedLevel = _level > 1 ? _level - 1 : 0;
+      if (clearedLevel > _highScore) {
+        _highScore = clearedLevel;
         _prefs.setInt('focus_spark_high_score', _highScore);
       }
 
@@ -425,46 +443,57 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Session Control ──────────────────────────────────────────────────────
   void _startSession() async {
-    final shown = await AdService.instance.showInterstitialAdOrLoad();
-    if (!shown && kIsWeb) {
-      _showTestInterstitialOverlay();
-    }
-    _cancelInputTimer();
-    _particleManager.clear();
-    _playbackSessionId++;
-    final currentSession = _playbackSessionId;
-    HapticFeedback.mediumImpact();
+    void launchGame() {
+      if (!mounted) return;
+      _cancelInputTimer();
+      _particleManager.clear();
+      _playbackSessionId++;
+      final currentSession = _playbackSessionId;
+      HapticFeedback.mediumImpact();
 
-    setState(() {
-      if (!_hasSeenTutorial) {
-        _hasSeenTutorial = true;
-        _showTutorialCard = false;
-        _prefs.setBool('focus_spark_has_seen_tutorial', true);
+      setState(() {
+        if (!_hasSeenTutorial) {
+          _hasSeenTutorial = true;
+          _showTutorialCard = false;
+          _prefs.setBool('focus_spark_has_seen_tutorial', true);
+        }
+        _gameState = GameState.playback;
+        _sequence.clear();
+        _playerInput.clear();
+        _level = 1;
+        _currentStreak = 0;
+        _sessionMaxLevel = 1;
+        _sessionMaxStreak = 0;
+        _showSessionSummary = false;
+        _freeHintsRemainingInLevel = 1;
+        _hintedTile = null;
+        _tileEntryScales = List.filled(9, 0.0);
+      });
+
+      _saveGameProgress();
+
+      // Staggered tile entry animation then run playback
+      Future.microtask(() async {
+        for (int i = 0; i < 9; i++) {
+          await Future.delayed(const Duration(milliseconds: 60));
+          if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
+          setState(() => _tileEntryScales[i] = 1.0);
+        }
+
+        if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
+        setState(() => _sequence.add(_random.nextInt(9)));
+        _runPlayback();
+      });
+    }
+
+    if (kIsWeb) {
+      _showTestInterstitialOverlay(onDismissed: launchGame);
+    } else {
+      final shown = await AdService.instance.showInterstitialAdOrLoad(onDismissed: launchGame);
+      if (!shown) {
+        launchGame();
       }
-      _gameState = GameState.playback;
-      _sequence.clear();
-      _playerInput.clear();
-      _level = 1;
-      _currentStreak = 0;
-      _sessionMaxLevel = 1;
-      _sessionMaxStreak = 0;
-      _showSessionSummary = false;
-      _freeHintsRemainingInLevel = 1;
-      _hintedTile = null;
-      _tileEntryScales = List.filled(9, 0.0);
-    });
-
-    // Staggered tile entry animation
-    for (int i = 0; i < 9; i++) {
-      await Future.delayed(const Duration(milliseconds: 60));
-      if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
-      setState(() => _tileEntryScales[i] = 1.0);
     }
-
-    if (_playbackSessionId != currentSession) return;
-    setState(() => _sequence.add(_random.nextInt(9)));
-    await _saveGameProgress();
-    _runPlayback();
   }
 
   void _continueSession() async {
@@ -643,7 +672,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
   }
 
-  void _showTestInterstitialOverlay() async {
+  void _showTestInterstitialOverlay({VoidCallback? onDismissed}) async {
     if (_isAdActive) return;
     _cancelInputTimer();
     HapticFeedback.mediumImpact();
@@ -661,9 +690,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _isAdActive = false;
     });
 
-    if (_gameState == GameState.playerInput) {
-      _startInputTimer();
-    }
+    onDismissed?.call();
   }
 
   void _playDirectRewardedAd() async {
@@ -913,20 +940,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           _freeHintsRemainingInLevel = 1;
           if (_level > _sessionMaxLevel) _sessionMaxLevel = _level;
           if (_currentStreak > _sessionMaxStreak) _sessionMaxStreak = _currentStreak;
-          if (_level > _highScore) {
-            _highScore = _level;
+          if (completedLevel > _highScore) {
+            _highScore = completedLevel;
           }
         });
-        if (_level > _highScore) _updateHighScore(_level);
-        _recordLeaderboardScore(_level, _currentStreak);
-
-        // Custom Interstitial Ad Frequency Rule
-        if (AdService.shouldShowInterstitialOnLevelComplete(completedLevel)) {
-          AdService.instance.showInterstitialAdOrLoad();
-        }
-
-        HapticFeedback.mediumImpact();
-        Future.delayed(const Duration(milliseconds: 80), () => HapticFeedback.mediumImpact());
+        if (completedLevel > _highScore) _updateHighScore(completedLevel);
+        _recordLeaderboardScore(completedLevel, _currentStreak);
 
         _spawnSuccessSparks(theme.accentColor);
 
@@ -939,12 +958,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
         Future.delayed(const Duration(milliseconds: 850), () {
           if (mounted && _gameState == GameState.successTransition) {
-            setState(() {
-              _gameState = GameState.playback;
-              _sequence.add(_random.nextInt(9));
-            });
-            _saveGameProgress();
-            _runPlayback();
+            _showLevelCompletedModal(context, theme, completedLevel);
           }
         });
       }
@@ -1142,19 +1156,23 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   }
 
   // ── HUD Item ─────────────────────────────────────────────────────────────
-  Widget _buildHUDItem(String title, String value, GameTheme theme, {Color? valueColor}) {
+  Widget _buildHUDItem(String title, String value, GameTheme theme, {Color? valueColor, double fontSize = 18.0}) {
     return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          title,
-          style: TextStyle(
-            fontSize: 10,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 1.8,
-            color: theme.textPrimary.withValues(alpha: 0.45),
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            title,
+            style: TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1.1,
+              color: theme.textPrimary.withValues(alpha: 0.5),
+            ),
           ),
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: 3),
         AnimatedSwitcher(
           duration: const Duration(milliseconds: 260),
           transitionBuilder: (child, animation) => ScaleTransition(
@@ -1164,13 +1182,16 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             ),
             child: child,
           ),
-          child: Text(
-            value,
-            key: ValueKey<String>(value),
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
-              color: valueColor ?? theme.textPrimary,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              value,
+              key: ValueKey<String>(value),
+              style: TextStyle(
+                fontSize: fontSize,
+                fontWeight: FontWeight.bold,
+                color: valueColor ?? theme.textPrimary,
+              ),
             ),
           ),
         ),
@@ -1944,6 +1965,265 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     );
   }
 
+  // ── Level Progression Helper ─────────────────────────────────────────────
+  void _advanceToNextLevelPlayback(int completedLevel) {
+    if (!mounted || _gameState != GameState.successTransition) return;
+
+    // Custom Interstitial Ad Frequency Rule
+    if (AdService.shouldShowInterstitialOnLevelComplete(completedLevel)) {
+      AdService.instance.showInterstitialAdOrLoad();
+    }
+
+    setState(() {
+      _gameState = GameState.playback;
+      _sequence.add(_random.nextInt(9));
+    });
+    _saveGameProgress();
+    _runPlayback();
+  }
+
+  // ── Level Completed Victory Modal ───────────────────────────────────────
+  void _showLevelCompletedModal(BuildContext context, GameTheme theme, int completedLevel) {
+    HapticFeedback.mediumImpact();
+    Future.delayed(const Duration(milliseconds: 80), () => HapticFeedback.mediumImpact());
+
+    String? milestoneRank;
+    if (completedLevel == 5) {
+      milestoneRank = 'SPARK INITIATE';
+    } else if (completedLevel == 10) {
+      milestoneRank = 'MATRIX ADEPT';
+    } else if (completedLevel == 15) {
+      milestoneRank = 'FOCUS SCHOLAR';
+    } else if (completedLevel == 20) {
+      milestoneRank = 'SPARK MASTER';
+    } else if (completedLevel == 25) {
+      milestoneRank = 'MATRIX GRANDMASTER';
+    } else if (completedLevel == 30) {
+      milestoneRank = 'MINDFUL LEGEND';
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withValues(alpha: 0.8),
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 400),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+            decoration: BoxDecoration(
+              color: theme.panelBg,
+              borderRadius: BorderRadius.circular(28),
+              border: Border.all(color: theme.accentColor.withValues(alpha: 0.6), width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: theme.accentColor.withValues(alpha: 0.25),
+                  blurRadius: 30,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Glowing Trophy Icon Badge
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: theme.accentColor.withValues(alpha: 0.15),
+                    border: Border.all(color: theme.accentColor, width: 2.0),
+                    boxShadow: [
+                      BoxShadow(
+                        color: theme.accentColor.withValues(alpha: 0.35),
+                        blurRadius: 18,
+                      ),
+                    ],
+                  ),
+                  child: Icon(
+                    Icons.emoji_events_rounded,
+                    size: 42,
+                    color: theme.accentColor,
+                  ),
+                ),
+                const SizedBox(height: 18),
+
+                // Victory Header
+                ShaderMask(
+                  shaderCallback: (bounds) => LinearGradient(
+                    colors: [
+                      Colors.white,
+                      theme.accentColor,
+                      theme.tileActiveGlow,
+                    ],
+                  ).createShader(bounds),
+                  child: Text(
+                    'LEVEL $completedLevel COMPLETED!',
+                    style: GoogleFonts.orbitron(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.6,
+                      color: Colors.white,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'EXCELLENT PATTERN REPLICATION',
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1.4,
+                    color: theme.textPrimary.withValues(alpha: 0.6),
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+
+                if (milestoneRank != null) ...[
+                  const SizedBox(height: 14),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: theme.accentColor.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: theme.accentColor.withValues(alpha: 0.5)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.stars_rounded, size: 14, color: Colors.amber),
+                        const SizedBox(width: 6),
+                        Text(
+                          'RANK UNLOCKED: $milestoneRank',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1.2,
+                            color: theme.textPrimary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+
+                const SizedBox(height: 22),
+
+                // Performance Summary HUD Grid
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.3),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: theme.panelBorder.withValues(alpha: 0.4)),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _buildHUDItem('NEXT LEVEL', 'LVL $_level', theme,
+                            valueColor: theme.accentColor, fontSize: 14.0),
+                      ),
+                      Container(
+                        height: 24,
+                        width: 1,
+                        color: theme.panelBorder.withValues(alpha: 0.3),
+                      ),
+                      Expanded(
+                        child: _buildHUDItem('STREAK', '$_currentStreak 🔥', theme,
+                            fontSize: 14.0),
+                      ),
+                      Container(
+                        height: 24,
+                        width: 1,
+                        color: theme.panelBorder.withValues(alpha: 0.3),
+                      ),
+                      Expanded(
+                        child: _buildHUDItem('BEST SCORE', 'LVL $_highScore', theme,
+                            fontSize: 14.0),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 26),
+
+                // Primary Action Button: CONTINUE TO NEXT LEVEL
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      _advanceToNextLevelPlayback(completedLevel);
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: theme.accentColor,
+                      foregroundColor: Colors.black87,
+                      elevation: 8,
+                      shadowColor: theme.accentColor.withValues(alpha: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                    icon: const Icon(Icons.play_arrow_rounded, size: 22),
+                    label: Text(
+                      'CONTINUE TO LEVEL $_level',
+                      style: GoogleFonts.orbitron(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 10),
+
+                // Secondary Action Button: VIEW ROADMAP
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      _showLevelRoadmapModal(
+                        context,
+                        theme,
+                        onDismiss: () {
+                          _advanceToNextLevelPlayback(completedLevel);
+                        },
+                      );
+                    },
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: theme.textPrimary,
+                      side: BorderSide(color: theme.panelBorder),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                    icon: Icon(Icons.map_outlined, size: 16, color: theme.textPrimary.withValues(alpha: 0.7)),
+                    label: Text(
+                      'VIEW ROADMAP',
+                      style: GoogleFonts.spaceGrotesk(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.2,
+                        color: theme.textPrimary.withValues(alpha: 0.85),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   // ── Instructions Modal ────────────────────────────────────────────────
   void _showInstructionsModal(BuildContext context, GameTheme theme) {
     HapticFeedback.selectionClick();
@@ -2047,7 +2327,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   }
 
   // ── Level Roadmap Modal ────────────────────────────────────────────────
-  void _showLevelRoadmapModal(BuildContext context, GameTheme theme) {
+  void _showLevelRoadmapModal(BuildContext context, GameTheme theme, {VoidCallback? onDismiss}) {
     HapticFeedback.selectionClick();
     final effectiveBest = math.max(_level, _highScore);
     final maxTargetLevel = math.max(effectiveBest + 8, 25);
@@ -2308,6 +2588,34 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                           },
                         ),
                       ),
+                      if (_gameState == GameState.successTransition) ...[
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: theme.accentColor,
+                              foregroundColor: Colors.black87,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                            ),
+                            icon: const Icon(Icons.play_arrow_rounded, size: 20),
+                            label: Text(
+                              'CONTINUE TO LEVEL $_level',
+                              style: GoogleFonts.orbitron(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -2316,7 +2624,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           ),
         );
       },
-    );
+    ).then((_) {
+      onDismiss?.call();
+    });
   }
 
   // ── Leaderboard Modal ──────────────────────────────────────────────────

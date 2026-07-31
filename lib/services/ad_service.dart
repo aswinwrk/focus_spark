@@ -129,13 +129,22 @@ class AdService {
     return completer.future;
   }
 
+  VoidCallback? onAdOpened;
+  VoidCallback? onAdClosed;
+
   void _showRewardedAdInstance(RewardedAd ad, Function(RewardItem reward) onUserEarnedReward) {
     ad.fullScreenContentCallback = FullScreenContentCallback(
+      onAdShowedFullScreenContent: (ad) {
+        debugPrint('Rewarded Ad showed full screen content.');
+        onAdOpened?.call();
+      },
       onAdDismissedFullScreenContent: (ad) {
         ad.dispose();
+        onAdClosed?.call();
       },
       onAdFailedToShowFullScreenContent: (ad, error) {
         ad.dispose();
+        onAdClosed?.call();
       },
     );
     ad.show(onUserEarnedReward: (ad, reward) {
@@ -217,12 +226,18 @@ class AdService {
 
   void _showInterstitialAdInstance(InterstitialAd ad, VoidCallback? onDismissed) {
     ad.fullScreenContentCallback = FullScreenContentCallback(
+      onAdShowedFullScreenContent: (ad) {
+        debugPrint('Interstitial Ad showed full screen content.');
+        onAdOpened?.call();
+      },
       onAdDismissedFullScreenContent: (ad) {
         ad.dispose();
+        onAdClosed?.call();
         onDismissed?.call();
       },
       onAdFailedToShowFullScreenContent: (ad, error) {
         ad.dispose();
+        onAdClosed?.call();
         onDismissed?.call();
       },
     );
