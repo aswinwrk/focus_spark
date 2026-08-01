@@ -308,7 +308,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       }
 
       final clearedLevel = _level > 1 ? _level - 1 : 0;
-      if (clearedLevel > _highScore) {
+      // Self-heal mobile SharedPreferences cache if high score was previously saved as upcoming _level
+      if (_highScore > clearedLevel && _highScore == _level && hasSavedGame) {
+        _highScore = clearedLevel;
+        _prefs.setInt('focus_spark_high_score', _highScore);
+      } else if (clearedLevel > _highScore) {
         _highScore = clearedLevel;
         _prefs.setInt('focus_spark_high_score', _highScore);
       }
@@ -2141,7 +2145,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                         color: theme.panelBorder.withValues(alpha: 0.3),
                       ),
                       Expanded(
-                        child: _buildHUDItem('BEST SCORE', 'LVL $_highScore', theme,
+                        child: _buildHUDItem(
+                            'BEST SCORE',
+                            'LVL ${math.max(completedLevel, _highScore > completedLevel && _highScore == completedLevel + 1 ? completedLevel : _highScore)}',
+                            theme,
                             fontSize: 14.0),
                       ),
                     ],
@@ -2329,7 +2336,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   // ── Level Roadmap Modal ────────────────────────────────────────────────
   void _showLevelRoadmapModal(BuildContext context, GameTheme theme, {VoidCallback? onDismiss}) {
     HapticFeedback.selectionClick();
-    final effectiveBest = math.max(_level, _highScore);
+    final clearedLevel = _level > 1 ? _level - 1 : 0;
+    final effectiveBest = math.max(clearedLevel, _highScore);
     final maxTargetLevel = math.max(effectiveBest + 8, 25);
     final ScrollController scrollController = ScrollController();
 
