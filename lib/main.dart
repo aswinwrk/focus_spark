@@ -307,13 +307,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _sequence.clear();
       }
 
-      final clearedLevel = _level > 1 ? _level - 1 : 0;
-      // Self-heal mobile SharedPreferences cache if high score was previously saved as upcoming _level
-      if (_highScore > clearedLevel && _highScore == _level && hasSavedGame) {
-        _highScore = clearedLevel;
-        _prefs.setInt('focus_spark_high_score', _highScore);
-      } else if (clearedLevel > _highScore) {
-        _highScore = clearedLevel;
+      if (_level > _highScore) {
+        _highScore = _level;
         _prefs.setInt('focus_spark_high_score', _highScore);
       }
 
@@ -490,14 +485,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       });
     }
 
-    if (kIsWeb) {
-      _showTestInterstitialOverlay(onDismissed: launchGame);
-    } else {
-      final shown = await AdService.instance.showInterstitialAdOrLoad(onDismissed: launchGame);
-      if (!shown) {
-        launchGame();
-      }
-    }
+    launchGame();
   }
 
   void _continueSession() async {
@@ -944,11 +932,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           _freeHintsRemainingInLevel = 1;
           if (_level > _sessionMaxLevel) _sessionMaxLevel = _level;
           if (_currentStreak > _sessionMaxStreak) _sessionMaxStreak = _currentStreak;
-          if (completedLevel > _highScore) {
-            _highScore = completedLevel;
+          if (_level > _highScore) {
+            _highScore = _level;
+            _prefs.setInt('focus_spark_high_score', _highScore);
           }
         });
-        if (completedLevel > _highScore) _updateHighScore(completedLevel);
         _recordLeaderboardScore(completedLevel, _currentStreak);
 
         _spawnSuccessSparks(theme.accentColor);
@@ -1154,6 +1142,160 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  // ── Input Timer Bar ──────────────────────────────────────────────────────
+  Widget _buildInputTimerBar(GameTheme theme) {
+    final remainingSecs = math.max(0.0, _totalInputTime - _elapsedInputTime);
+    final pct = _inputTimerPercentage.clamp(0.0, 1.0);
+
+    final Color barColor;
+    final Color glowColor;
+    final String statusText;
+    final IconData statusIcon;
+
+    if (pct > 0.40) {
+      barColor = theme.accentColor;
+      glowColor = theme.tileActiveGlow;
+      statusText = 'TIME REMAINING';
+      statusIcon = Icons.timer_outlined;
+    } else if (pct > 0.20) {
+      barColor = const Color(0xFFF59E0B);
+      glowColor = const Color(0xFFFBBF24);
+      statusText = 'HURRY UP!';
+      statusIcon = Icons.bolt_rounded;
+    } else {
+      barColor = const Color(0xFFEF4444);
+      glowColor = const Color(0xFFF87171);
+      statusText = 'CRITICAL TIME!';
+      statusIcon = Icons.warning_amber_rounded;
+    }
+
+    return AnimatedOpacity(
+      opacity: _gameState == GameState.playerInput ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 250),
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 14.0),
+        child: Column(
+          children: [
+            // Header Row: Status Tag & Digital Seconds Counter
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(statusIcon, size: 12, color: barColor),
+                    const SizedBox(width: 4),
+                    Text(
+                      statusText,
+                      style: GoogleFonts.orbitron(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.1,
+                        color: barColor,
+                      ),
+                    ),
+                  ],
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2.5),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.35),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: barColor.withValues(alpha: 0.4)),
+                  ),
+                  child: Text(
+                    '${remainingSecs.toStringAsFixed(1)}s',
+                    style: GoogleFonts.orbitron(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.0,
+                      color: barColor,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+
+            // Neon Capsule Energy Track
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final trackWidth = constraints.maxWidth;
+                final barWidth = trackWidth * pct;
+
+                return Container(
+                  height: 10,
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.4),
+                    borderRadius: BorderRadius.circular(30),
+                    border: Border.all(
+                      color: barColor.withValues(alpha: 0.35),
+                      width: 1.2,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: barColor.withValues(alpha: 0.15),
+                        blurRadius: 10,
+                      ),
+                    ],
+                  ),
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      // Active Progress Fill
+                      Container(
+                        width: barWidth,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(30),
+                          gradient: LinearGradient(
+                            colors: [
+                              barColor.withValues(alpha: 0.6),
+                              barColor,
+                              glowColor,
+                            ],
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: barColor.withValues(alpha: 0.45),
+                              blurRadius: 8,
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      // Leading-Edge Energy Spark Orb
+                      if (pct > 0.02)
+                        Positioned(
+                          left: math.max(0, barWidth - 8),
+                          top: -2,
+                          child: Container(
+                            width: 12,
+                            height: 12,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.white,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: barColor,
+                                  blurRadius: 10,
+                                  spreadRadius: 2,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
         ),
       ),
     );
@@ -1619,41 +1761,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                               ),
 
                               // ── Input Timer Bar ──────────────────────────
-                              AnimatedOpacity(
-                                opacity: _gameState == GameState.playerInput ? 1.0 : 0.0,
-                                duration: const Duration(milliseconds: 250),
-                                child: Padding(
-                                  padding: const EdgeInsets.only(bottom: 14.0),
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: [
-                                      ClipRRect(
-                                        borderRadius: BorderRadius.circular(4),
-                                        child: Container(
-                                          height: 5,
-                                          color: theme.tileDefault,
-                                          child: FractionallySizedBox(
-                                            alignment: Alignment.centerLeft,
-                                            widthFactor: _inputTimerPercentage,
-                                            child: Container(
-                                              decoration: BoxDecoration(
-                                                gradient: LinearGradient(
-                                                  colors: [
-                                                    _inputTimerPercentage > 0.3
-                                                        ? theme.accentColor
-                                                        : const Color(0xFFEF4444),
-                                                    theme.tileActiveGlow,
-                                                  ],
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
+                              _buildInputTimerBar(theme),
 
                               // ── Grid (or splash content) ─────────────────
                               if (isStart)
@@ -1970,20 +2078,31 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   }
 
   // ── Level Progression Helper ─────────────────────────────────────────────
-  void _advanceToNextLevelPlayback(int completedLevel) {
+  void _advanceToNextLevelPlayback(int completedLevel) async {
     if (!mounted || _gameState != GameState.successTransition) return;
 
-    // Custom Interstitial Ad Frequency Rule
-    if (AdService.shouldShowInterstitialOnLevelComplete(completedLevel)) {
-      AdService.instance.showInterstitialAdOrLoad();
+    void startNextLevelSequence() {
+      if (!mounted) return;
+      setState(() {
+        _gameState = GameState.playback;
+        _sequence.add(_random.nextInt(9));
+      });
+      _saveGameProgress();
+      _runPlayback();
     }
 
-    setState(() {
-      _gameState = GameState.playback;
-      _sequence.add(_random.nextInt(9));
-    });
-    _saveGameProgress();
-    _runPlayback();
+    if (AdService.shouldShowInterstitialOnLevelComplete(completedLevel)) {
+      if (kIsWeb) {
+        _showTestInterstitialOverlay(onDismissed: startNextLevelSequence);
+      } else {
+        final shown = await AdService.instance.showInterstitialAdOrLoad(onDismissed: startNextLevelSequence);
+        if (!shown) {
+          startNextLevelSequence();
+        }
+      }
+    } else {
+      startNextLevelSequence();
+    }
   }
 
   // ── Level Completed Victory Modal ───────────────────────────────────────
@@ -2147,7 +2266,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                       Expanded(
                         child: _buildHUDItem(
                             'BEST SCORE',
-                            'LVL ${math.max(completedLevel, _highScore > completedLevel && _highScore == completedLevel + 1 ? completedLevel : _highScore)}',
+                            'LVL ${math.max(_level, _highScore)}',
                             theme,
                             fontSize: 14.0),
                       ),
@@ -2336,8 +2455,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   // ── Level Roadmap Modal ────────────────────────────────────────────────
   void _showLevelRoadmapModal(BuildContext context, GameTheme theme, {VoidCallback? onDismiss}) {
     HapticFeedback.selectionClick();
-    final clearedLevel = _level > 1 ? _level - 1 : 0;
-    final effectiveBest = math.max(clearedLevel, _highScore);
+    final effectiveBest = math.max(_level, _highScore);
     final maxTargetLevel = math.max(effectiveBest + 8, 25);
     final ScrollController scrollController = ScrollController();
 
