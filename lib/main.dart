@@ -84,6 +84,8 @@ class GameTheme {
   });
 }
 
+enum HapticType { light, medium, heavy, victory, error, heartbeat }
+
 // ---------------------------------------------------------------------------
 // Main Screen
 // ---------------------------------------------------------------------------
@@ -182,6 +184,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   bool _isZenMode = false;
   bool _isMusicMuted = false;
   bool _isSfxMuted = false;
+  bool _isHapticsMuted = false;
 
   // ── Tile Interaction State ───────────────────────────────────────────────
   int? _activePlaybackTile;
@@ -290,6 +293,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _isZenMode = _prefs.getBool('focus_spark_zen_mode') ?? false;
       _isMusicMuted = _prefs.getBool('focus_spark_is_music_muted') ?? false;
       _isSfxMuted = _prefs.getBool('focus_spark_is_sfx_muted') ?? false;
+      _isHapticsMuted = _prefs.getBool('focus_spark_is_haptics_muted') ?? false;
       _selectedThemeIndex = _prefs.getInt('focus_spark_theme_index') ?? 0;
       _hasSeenTutorial = _prefs.getBool('focus_spark_has_seen_tutorial') ?? false;
       _showTutorialCard = !_hasSeenTutorial;
@@ -391,6 +395,41 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     if (mounted) setState(() {});
   }
 
+  // ── Haptic Engine Helper ──────────────────────────────────────────────────
+  void _triggerHaptic(HapticType type) {
+    if (_isHapticsMuted) return;
+    switch (type) {
+      case HapticType.light:
+        HapticFeedback.lightImpact();
+        AudioService.instance.vibrate(durationMs: 55);
+        break;
+      case HapticType.medium:
+        HapticFeedback.mediumImpact();
+        AudioService.instance.vibrate(durationMs: 75);
+        break;
+      case HapticType.heavy:
+        HapticFeedback.heavyImpact();
+        AudioService.instance.vibrate(durationMs: 110);
+        break;
+      case HapticType.victory:
+        HapticFeedback.heavyImpact();
+        AudioService.instance.vibrate(durationMs: 120);
+        Future.delayed(const Duration(milliseconds: 140), () {
+          HapticFeedback.lightImpact();
+          AudioService.instance.vibrate(durationMs: 60);
+        });
+        break;
+      case HapticType.error:
+        HapticFeedback.vibrate();
+        AudioService.instance.vibrate(durationMs: 160);
+        break;
+      case HapticType.heartbeat:
+        HapticFeedback.selectionClick();
+        AudioService.instance.vibrate(durationMs: 40);
+        break;
+    }
+  }
+
   Future<void> _toggleZenMode() async {
     setState(() => _isZenMode = !_isZenMode);
     await _prefs.setBool('focus_spark_zen_mode', _isZenMode);
@@ -410,11 +449,21 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   }
 
   void _toggleSfx() async {
-    HapticFeedback.selectionClick();
+    _triggerHaptic(HapticType.light);
     setState(() {
       _isSfxMuted = !_isSfxMuted;
     });
     await _prefs.setBool('focus_spark_is_sfx_muted', _isSfxMuted);
+  }
+
+  void _toggleHaptics() async {
+    if (_isHapticsMuted) {
+      HapticFeedback.lightImpact();
+    }
+    setState(() {
+      _isHapticsMuted = !_isHapticsMuted;
+    });
+    await _prefs.setBool('focus_spark_is_haptics_muted', _isHapticsMuted);
   }
 
   Future<void> _selectTheme(int index) async {
@@ -588,6 +637,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       if (_elapsedInputTime >= _totalInputTime) {
         _cancelInputTimer();
         _handleTimeout();
+      } else {
+        // Heartbeat haptic pulse during critical time (< 20%)
+        final pct = _inputTimerPercentage.clamp(0.0, 1.0);
+        if (pct <= 0.20 && (timer.tick % 10 == 0)) {
+          _triggerHaptic(HapticType.heartbeat);
+        }
       }
     });
   }
@@ -599,13 +654,13 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   void _handleTimeout() {
     if (_gameState != GameState.playerInput) return;
+    _triggerHaptic(HapticType.error);
     setState(() {
       _gameState = GameState.errorTransition;
       _currentStreak = 0;
       _correctErrorTile = _sequence[_playerInput.length];
       _hintedTile = null;
     });
-    HapticFeedback.vibrate();
     if (!_isSfxMuted) AudioService.instance.playTone(130.81, 0.4);
 
     Future.delayed(const Duration(milliseconds: 1200), () {
@@ -909,6 +964,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void _handleTileClick(int clickedIndex) {
     if (_gameState != GameState.playerInput) return;
 
+    _triggerHaptic(HapticType.light);
+
     if (_hintedTile != null) {
       setState(() {
         _hintedTile = null;
@@ -939,6 +996,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         });
         _recordLeaderboardScore(completedLevel, _currentStreak);
 
+        _triggerHaptic(HapticType.victory);
         _spawnSuccessSparks(theme.accentColor);
 
         if (!_isSfxMuted) {
@@ -963,7 +1021,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _correctErrorTile = expectedIndex;
       });
       _saveGameProgress();
-      HapticFeedback.vibrate();
+      _triggerHaptic(HapticType.error);
       if (!_isSfxMuted) AudioService.instance.playTone(130.81, 0.4);
 
       Future.delayed(const Duration(milliseconds: 1200), () {
@@ -1648,6 +1706,18 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                           onTap: _toggleSfx,
                           theme: theme,
                           tooltip: _isSfxMuted ? 'Enable SFX' : 'Mute SFX',
+                        ),
+                        const SizedBox(width: 4),
+
+                        // 2c. Haptic Feedback Toggle Button
+                        _buildIconToggle(
+                          icon: _isHapticsMuted
+                              ? Icons.vibration_outlined
+                              : Icons.vibration_rounded,
+                          isActive: !_isHapticsMuted,
+                          onTap: _toggleHaptics,
+                          theme: theme,
+                          tooltip: _isHapticsMuted ? 'Enable Haptics' : 'Mute Haptics',
                         ),
                         const SizedBox(width: 4),
 

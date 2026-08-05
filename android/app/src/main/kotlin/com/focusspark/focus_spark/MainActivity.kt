@@ -8,6 +8,12 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import kotlin.math.*
 
+import android.content.Context
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+
 class MainActivity : FlutterActivity() {
 
     companion object {
@@ -43,8 +49,42 @@ class MainActivity : FlutterActivity() {
                     stopNativeAmbientMusic()
                     result.success(null)
                 }
+                "vibrate" -> {
+                    val durationMs = (call.argument<Any>("durationMs") as? Number)?.toLong() ?: 40L
+                    triggerNativeVibration(durationMs)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    private fun triggerNativeVibration(durationMs: Long) {
+        try {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                vibratorManager.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            }
+
+            if (!vibrator.hasVibrator()) return
+
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_GAME)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val effect = VibrationEffect.createOneShot(durationMs, 255)
+                vibrator.vibrate(effect, audioAttributes)
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(durationMs)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("FocusSpark", "Native vibration error: ${e.message}")
         }
     }
 

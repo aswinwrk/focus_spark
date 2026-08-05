@@ -26,6 +26,11 @@ class NativeAudioService implements AudioService {
     _invokeChannel('stopAmbientMusic');
   }
 
+  @override
+  void vibrate({int durationMs = 40}) {
+    _invokeChannel('vibrate', {'durationMs': durationMs});
+  }
+
   Future<void> _invokeChannel(String method, [Map<String, dynamic>? args]) async {
     try {
       await _channel.invokeMethod<void>(method, args);

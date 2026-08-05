@@ -40,4 +40,9 @@ class WebAudioService implements AudioService {
       debugPrint('WebAudioService stopAmbientMusic error: $e');
     }
   }
+
+  @override
+  void vibrate({int durationMs = 40}) {
+    // Vibration is handled by HapticFeedback on Web if supported by browser navigator.vibrate
+  }
 }
