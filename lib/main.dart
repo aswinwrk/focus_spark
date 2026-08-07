@@ -97,7 +97,7 @@ class FocusSparkScreen extends StatefulWidget {
 }
 
 class _FocusSparkScreenState extends State<FocusSparkScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   // ── Theme Presets ───────────────────────────────────────────────────────
   final List<GameTheme> _themes = const [
     GameTheme(
@@ -190,6 +190,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   int? _activePlaybackTile;
   int? _correctErrorTile;
   int? _activeTapTile;
+  int? _rippleTileIndex;
   final List<bool> _hoverStates = List.filled(9, false);
   List<double> _tileEntryScales = List.filled(9, 1.0);
 
@@ -205,6 +206,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Particle & Ad Engine ──────────────────────────────────────────────────
   late ParticleManager _particleManager;
+  late AnimationController _praiseController;
+  late Animation<double> _praiseScaleAnimation;
+  late Animation<double> _praiseOpacityAnimation;
+  String? _activePraiseText;
+  Color _activePraiseColor = const Color(0xFFA78BFA);
+
   int _splashStage = 0;
   late SharedPreferences _prefs;
   final math.Random _random = math.Random();
@@ -216,6 +223,22 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void initState() {
     super.initState();
     _particleManager = ParticleManager(this);
+
+    _praiseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    );
+
+    _praiseScaleAnimation = CurvedAnimation(
+      parent: _praiseController,
+      curve: const Interval(0.0, 0.6, curve: Curves.elasticOut),
+    );
+
+    _praiseOpacityAnimation = CurvedAnimation(
+      parent: _praiseController,
+      curve: const Interval(0.65, 1.0, curve: Curves.easeOut),
+    );
+
     _loadSettings();
     _initAdMobBanner();
 
@@ -260,6 +283,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   @override
   void dispose() {
+    _praiseController.dispose();
     _bannerAd?.dispose();
     _particleManager.disposeTicker();
     _particleManager.dispose();
@@ -430,6 +454,36 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
   }
 
+  // ── Praise Text Engine ───────────────────────────────────────────────────
+  void _triggerPraiseText(String text, Color glowColor) {
+    setState(() {
+      _activePraiseText = text;
+      _activePraiseColor = glowColor;
+    });
+    _praiseController.forward(from: 0.0);
+  }
+
+  String _getPraiseForLevel(int completedLevel) {
+    final List<String> tier1 = ['NICE FOCUS! 🎯', 'SPARK! ⚡', 'SHARP! ⚔️', 'SMART MOVE! 💡'];
+    final List<String> tier2 = ['SYNAPSE SURGE! ⚡', 'BRILLIANT! 🌟', 'HYPER FOCUS! 👁️', 'LASER MATRIX! 🔮'];
+    final List<String> tier3 = ['SUPERCHARGED! 🔋', 'BRAIN POWER! 🧠', 'UNSTOPPABLE! 🚀', 'LIGHTNING MIND! ⚡'];
+    final List<String> tier4 = ['MASTERMIND! 👑', 'MIND BENDER! 🔮', 'CYBER OVERLORD! 🌐', 'ULTIMATE SPARK! 💥'];
+
+    if (completedLevel <= 4) {
+      return tier1[_random.nextInt(tier1.length)];
+    } else if (completedLevel <= 9) {
+      return tier2[_random.nextInt(tier2.length)];
+    } else if (completedLevel <= 14) {
+      return tier3[_random.nextInt(tier3.length)];
+    } else {
+      return tier4[_random.nextInt(tier4.length)];
+    }
+  }
+
+  String _getFailurePraiseText() {
+    return 'TRY AGAIN! 🔄';
+  }
+
   Future<void> _toggleZenMode() async {
     setState(() => _isZenMode = !_isZenMode);
     await _prefs.setBool('focus_spark_zen_mode', _isZenMode);
@@ -487,6 +541,21 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   void _spawnSuccessSparks(Color color) {
     _particleManager.spawnSparks(_gridWidth / 2, _gridHeight / 2, color, 60);
+    _particleManager.spawnConfettiBurst(_gridWidth / 2, _gridHeight / 2, 45);
+  }
+
+  Future<void> _triggerGridRippleWave() async {
+    for (int i = 0; i < 9; i++) {
+      if (!mounted) return;
+      setState(() => _rippleTileIndex = i);
+      if (!_isSfxMuted) {
+        AudioService.instance.playTone(_frequencies[i], 0.08);
+      }
+      await Future.delayed(const Duration(milliseconds: 40));
+    }
+    if (mounted) {
+      setState(() => _rippleTileIndex = null);
+    }
   }
 
   // ── Session Control ──────────────────────────────────────────────────────
@@ -662,6 +731,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _hintedTile = null;
     });
     if (!_isSfxMuted) AudioService.instance.playTone(130.81, 0.4);
+
+    final failMsg = _getFailurePraiseText();
+    _triggerPraiseText(failMsg, const Color(0xFFEF4444));
 
     Future.delayed(const Duration(milliseconds: 1200), () {
       if (mounted && _gameState == GameState.errorTransition) {
@@ -998,6 +1070,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
         _triggerHaptic(HapticType.victory);
         _spawnSuccessSparks(theme.accentColor);
+        _triggerGridRippleWave();
+
+        // Trigger Focus Praise Text Popup!
+        final praiseMsg = _getPraiseForLevel(completedLevel);
+        _triggerPraiseText(praiseMsg, theme.accentColor);
 
         if (!_isSfxMuted) {
           final frequency = _frequencies[clickedIndex];
@@ -1023,6 +1100,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _saveGameProgress();
       _triggerHaptic(HapticType.error);
       if (!_isSfxMuted) AudioService.instance.playTone(130.81, 0.4);
+
+      final failMsg = _getFailurePraiseText();
+      _triggerPraiseText(failMsg, const Color(0xFFEF4444));
 
       Future.delayed(const Duration(milliseconds: 1200), () {
         if (mounted && _gameState == GameState.errorTransition) {
@@ -1062,10 +1142,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _gameState == GameState.playback && _activePlaybackTile == index;
     final bool isTapFlash = _activeTapTile == index;
     final bool isHinted = _hintedTile == index;
+    final bool isRippleFlash = _rippleTileIndex == index;
     final bool isErrorFlash =
         _gameState == GameState.errorTransition && _correctErrorTile == index;
     final bool isSuccess = _gameState == GameState.successTransition;
-    final bool isFlashing = isPlaybackFlash || isTapFlash || isHinted;
+    final bool isFlashing = isPlaybackFlash || isTapFlash || isHinted || isRippleFlash;
     final bool inputLock = _gameState != GameState.playerInput;
 
     double scale = _tileEntryScales[index];
@@ -1518,6 +1599,65 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     );
   }
 
+  // ── Praise Text Overlay ──────────────────────────────────────────────────
+  Widget _buildPraiseTextOverlay(GameTheme theme) {
+    if (_activePraiseText == null) return const SizedBox.shrink();
+
+    return AnimatedBuilder(
+      animation: _praiseController,
+      builder: (context, child) {
+        if (_praiseController.isDismissed || _praiseController.value >= 0.98) {
+          return const SizedBox.shrink();
+        }
+
+        final opacity = (1.0 - _praiseOpacityAnimation.value).clamp(0.0, 1.0);
+        final scale = _praiseScaleAnimation.value.clamp(0.0, 1.4);
+        final translateY = -40.0 * _praiseController.value;
+
+        return Positioned.fill(
+          child: IgnorePointer(
+            child: Center(
+              child: Transform.translate(
+                offset: Offset(0, translateY),
+                child: Transform.scale(
+                  scale: scale,
+                  child: Opacity(
+                    opacity: opacity,
+                    child: Text(
+                      _activePraiseText!,
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.orbitron(
+                        fontSize: 26,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 2.0,
+                        color: Colors.white,
+                        shadows: [
+                          Shadow(
+                            color: _activePraiseColor,
+                            blurRadius: 28,
+                          ),
+                          Shadow(
+                            color: _activePraiseColor.withValues(alpha: 0.8),
+                            blurRadius: 16,
+                          ),
+                          const Shadow(
+                            color: Colors.black,
+                            blurRadius: 10,
+                            offset: Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   // ── Pause Overlay ────────────────────────────────────────────────────────
   Widget _buildPauseOverlay(GameTheme theme) {
     return Positioned.fill(
@@ -1873,7 +2013,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                         ),
                                       ),
                                     ),
-                                     // Pause overlay
+                                      // Praise Text Overlay
+                                      _buildPraiseTextOverlay(theme),
+                                      // Pause overlay
                                      _buildPauseOverlay(theme),
                                      // Direct Rewarded Ad overlay
                                      _buildDirectAdOverlay(theme),
@@ -2263,18 +2405,50 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                     textAlign: TextAlign.center,
                   ),
                 ),
-                const SizedBox(height: 6),
-                Text(
-                  'EXCELLENT PATTERN REPLICATION',
-                  style: GoogleFonts.spaceGrotesk(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1.4,
-                    color: theme.textPrimary.withValues(alpha: 0.6),
-                  ),
-                  textAlign: TextAlign.center,
-                ),
+                const SizedBox(height: 10),
 
+                // 3-Star Performance Rating System
+                Builder(
+                  builder: (context) {
+                    final int starsEarned = _inputTimerPercentage >= 0.65 ? 3 : (_inputTimerPercentage >= 0.30 ? 2 : 1);
+                    final String starRatingText = starsEarned == 3
+                        ? 'PERFECT SPARK! ⚡'
+                        : (starsEarned == 2 ? 'GREAT FOCUS! 🎯' : 'LEVEL CLEARED! 🏁');
+                    final Color starColor = starsEarned == 3
+                        ? const Color(0xFFF59E0B)
+                        : (starsEarned == 2 ? const Color(0xFF10B981) : const Color(0xFF06B6D4));
+
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: List.generate(3, (index) {
+                            final isEarned = index < starsEarned;
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                              child: Icon(
+                                isEarned ? Icons.star_rounded : Icons.star_border_rounded,
+                                size: index == 1 ? 34 : 26,
+                                color: isEarned ? starColor : Colors.white24,
+                              ),
+                            );
+                          }),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          starRatingText,
+                          style: GoogleFonts.orbitron(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 1.2,
+                            color: starColor,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
                 if (milestoneRank != null) ...[
                   const SizedBox(height: 14),
                   Container(
@@ -3615,6 +3789,10 @@ class SparkParticle {
   double x, y, vx, vy, size, alpha, lifetime;
   final Color color;
   final double maxLifetime;
+  final bool isConfetti;
+  double rotation;
+  double rotationSpeed;
+  double width;
 
   SparkParticle({
     required this.x,
@@ -3624,13 +3802,23 @@ class SparkParticle {
     required this.size,
     required this.color,
     required this.maxLifetime,
+    this.isConfetti = false,
+    this.rotation = 0.0,
+    this.rotationSpeed = 0.0,
+    this.width = 0.0,
   })  : alpha = 1.0,
         lifetime = 0.0;
 
   void update(double dt) {
     x += vx * dt;
     y += vy * dt;
-    vy += 90.0 * dt;
+    if (isConfetti) {
+      vy += 120.0 * dt;
+      vx *= 0.98;
+      rotation += rotationSpeed * dt;
+    } else {
+      vy += 90.0 * dt;
+    }
     lifetime += dt;
     alpha = (1.0 - (lifetime / maxLifetime)).clamp(0.0, 1.0);
   }
@@ -3660,6 +3848,40 @@ class ParticleManager extends ChangeNotifier {
         size: 2.0 + rng.nextDouble() * 4.5,
         color: color,
         maxLifetime: 0.38 + rng.nextDouble() * 0.52,
+      ));
+    }
+    notifyListeners();
+  }
+
+  void spawnConfettiBurst(double cx, double cy, int count) {
+    final rng = math.Random();
+    final List<Color> confettiColors = const [
+      Color(0xFFEC4899), // Neon Pink
+      Color(0xFF06B6D4), // Cyan
+      Color(0xFFF59E0B), // Gold
+      Color(0xFF8B5CF6), // Purple
+      Color(0xFF10B981), // Emerald
+      Color(0xFFF97316), // Orange
+      Color(0xFFEF4444), // Crimson
+    ];
+
+    for (int i = 0; i < count; i++) {
+      final angle = rng.nextDouble() * 2 * math.pi;
+      final speed = 130.0 + rng.nextDouble() * 250.0;
+      final color = confettiColors[rng.nextInt(confettiColors.length)];
+
+      particles.add(SparkParticle(
+        x: cx,
+        y: cy,
+        vx: math.cos(angle) * speed,
+        vy: math.sin(angle) * speed - 160.0,
+        size: 4.5 + rng.nextDouble() * 4.5,
+        color: color,
+        maxLifetime: 1.1 + rng.nextDouble() * 0.8,
+        isConfetti: true,
+        rotation: rng.nextDouble() * 2 * math.pi,
+        rotationSpeed: (rng.nextDouble() - 0.5) * 12.0,
+        width: 9.0 + rng.nextDouble() * 9.0,
       ));
     }
     notifyListeners();
@@ -3699,7 +3921,22 @@ class ParticlePainter extends CustomPainter {
     final paint = Paint()..style = PaintingStyle.fill;
     for (final p in particles) {
       paint.color = p.color.withValues(alpha: p.alpha);
-      canvas.drawCircle(Offset(p.x, p.y), p.size, paint);
+      if (p.isConfetti) {
+        canvas.save();
+        canvas.translate(p.x, p.y);
+        canvas.rotate(p.rotation);
+        canvas.drawRect(
+          Rect.fromCenter(
+            center: Offset.zero,
+            width: p.width,
+            height: p.size,
+          ),
+          paint,
+        );
+        canvas.restore();
+      } else {
+        canvas.drawCircle(Offset(p.x, p.y), p.size, paint);
+      }
     }
   }
 
