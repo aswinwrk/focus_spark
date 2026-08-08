@@ -97,7 +97,7 @@ class FocusSparkScreen extends StatefulWidget {
 }
 
 class _FocusSparkScreenState extends State<FocusSparkScreen>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   // ── Theme Presets ───────────────────────────────────────────────────────
   final List<GameTheme> _themes = const [
     GameTheme(
@@ -222,6 +222,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _particleManager = ParticleManager(this);
 
     _praiseController = AnimationController(
@@ -283,12 +284,34 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _praiseController.dispose();
     _bannerAd?.dispose();
     _particleManager.disposeTicker();
     _particleManager.dispose();
     _cancelInputTimer();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden) {
+      AudioService.instance.stopAmbientMusic();
+      _cancelInputTimer();
+      if (_gameState == GameState.playerInput || _gameState == GameState.playback) {
+        setState(() {
+          _gameState = GameState.paused;
+          _activePlaybackTile = null;
+        });
+        _saveGameProgress();
+      }
+    } else if (state == AppLifecycleState.resumed) {
+      if (!_isMusicMuted && _splashStage == 2) {
+        AudioService.instance.startAmbientMusic();
+      }
+    }
   }
 
   // ── Persistence ─────────────────────────────────────────────────────────
