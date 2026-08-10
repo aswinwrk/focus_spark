@@ -198,16 +198,14 @@ class MainActivity : FlutterActivity() {
         try {
             audioTrack.write(buffer, 0, numSamples)
             audioTrack.play()
-        } catch (e: Exception) {
-            // Ignore temporary audio track exceptions
+            val sleepMs = (durationSeconds * 1000).toLong() + 10L
+            Thread.sleep(sleepMs)
+        } catch (_: Exception) {
         } finally {
-            Thread {
-                try {
-                    Thread.sleep((durationSeconds * 1000).toLong() + 20L)
-                    audioTrack.stop()
-                    audioTrack.release()
-                } catch (e: Exception) {}
-            }.start()
+            try {
+                audioTrack.stop()
+                audioTrack.release()
+            } catch (_: Exception) {}
         }
     }
 

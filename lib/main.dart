@@ -3018,6 +3018,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         );
       },
     ).then((_) {
+      scrollController.dispose();
       onDismiss?.call();
     });
   }
