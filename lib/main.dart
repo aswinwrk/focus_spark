@@ -185,6 +185,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   bool _isMusicMuted = false;
   bool _isSfxMuted = false;
   bool _isHapticsMuted = false;
+  String _playerName = 'You';
 
   // ── Tile Interaction State ───────────────────────────────────────────────
   int? _activePlaybackTile;
@@ -341,6 +342,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _isMusicMuted = _prefs.getBool('focus_spark_is_music_muted') ?? false;
       _isSfxMuted = _prefs.getBool('focus_spark_is_sfx_muted') ?? false;
       _isHapticsMuted = _prefs.getBool('focus_spark_is_haptics_muted') ?? false;
+      _playerName = _prefs.getString('focus_spark_player_name') ?? 'You';
       _selectedThemeIndex = _prefs.getInt('focus_spark_theme_index') ?? 0;
       _hasSeenTutorial = _prefs.getBool('focus_spark_has_seen_tutorial') ?? false;
       _showTutorialCard = !_hasSeenTutorial;
@@ -394,7 +396,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           LeaderboardEntry(playerName: 'Calm Thinker', level: 3, streak: 3, date: now.subtract(const Duration(days: 9))),
         ];
       }
-      _leaderboard = loadedLeaderboard;
+      _leaderboard = _deduplicateLeaderboardEntries(loadedLeaderboard);
     });
   }
 
@@ -416,22 +418,58 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     await _prefs.setInt('focus_spark_high_score', score);
   }
 
-  Future<void> _recordLeaderboardScore(int level, int streak) async {
-    if (level <= 1 && streak <= 0) return;
-
-    final entry = LeaderboardEntry(
-      playerName: 'You',
-      level: level,
-      streak: streak,
-      date: DateTime.now(),
-    );
-
-    _leaderboard.add(entry);
-    _leaderboard.sort((a, b) {
+  List<LeaderboardEntry> _deduplicateLeaderboardEntries(List<LeaderboardEntry> entries) {
+    final Map<String, LeaderboardEntry> bestEntries = {};
+    for (final entry in entries) {
+      final existing = bestEntries[entry.playerName];
+      if (existing == null) {
+        bestEntries[entry.playerName] = entry;
+      } else {
+        if (entry.level > existing.level || (entry.level == existing.level && entry.streak > existing.streak)) {
+          bestEntries[entry.playerName] = entry;
+        }
+      }
+    }
+    final List<LeaderboardEntry> result = bestEntries.values.toList();
+    result.sort((a, b) {
       int cmp = b.level.compareTo(a.level);
       if (cmp == 0) return b.streak.compareTo(a.streak);
       return cmp;
     });
+    return result;
+  }
+
+  Future<void> _recordLeaderboardScore(int level, int streak) async {
+    if (level <= 1 && streak <= 0) return;
+
+    final existingIdx = _leaderboard.indexWhere((e) => e.playerName == _playerName || e.playerName == 'You');
+    if (existingIdx != -1) {
+      final existing = _leaderboard[existingIdx];
+      if (level > existing.level || (level == existing.level && streak > existing.streak)) {
+        _leaderboard[existingIdx] = LeaderboardEntry(
+          playerName: _playerName,
+          level: level,
+          streak: streak,
+          date: DateTime.now(),
+        );
+      } else {
+        _leaderboard[existingIdx] = LeaderboardEntry(
+          playerName: _playerName,
+          level: existing.level,
+          streak: existing.streak,
+          date: existing.date,
+        );
+      }
+    } else {
+      _leaderboard.add(LeaderboardEntry(
+        playerName: _playerName,
+        level: level,
+        streak: streak,
+        date: DateTime.now(),
+      ));
+    }
+
+    _leaderboard = _deduplicateLeaderboardEntries(_leaderboard);
 
     if (_leaderboard.length > 10) {
       _leaderboard = _leaderboard.sublist(0, 10);
@@ -3023,6 +3061,139 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     });
   }
 
+  // ── Edit Player Name Modal ─────────────────────────────────────────────
+  void _showEditPlayerNameModal(BuildContext context, GameTheme theme) {
+    HapticFeedback.selectionClick();
+    final TextEditingController nameController = TextEditingController(text: _playerName);
+
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.8),
+      builder: (dialogCtx) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 360),
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: theme.panelBg,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: theme.accentColor.withValues(alpha: 0.5), width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: theme.accentColor.withValues(alpha: 0.25),
+                  blurRadius: 28,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.edit_rounded, color: theme.accentColor, size: 20),
+                    const SizedBox(width: 8),
+                    Text(
+                      'EDIT GAMER TAG',
+                      style: GoogleFonts.orbitron(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.4,
+                        color: theme.textPrimary,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: nameController,
+                  maxLength: 14,
+                  autofocus: true,
+                  style: TextStyle(
+                    color: theme.textPrimary,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                  decoration: InputDecoration(
+                    labelText: 'Player Name',
+                    labelStyle: TextStyle(color: theme.accentColor),
+                    counterStyle: TextStyle(color: theme.textPrimary.withValues(alpha: 0.5)),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide(color: theme.panelBorder),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide(color: theme.accentColor, width: 1.5),
+                    ),
+                    filled: true,
+                    fillColor: theme.tileDefault.withValues(alpha: 0.3),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.of(dialogCtx).pop(),
+                      child: Text(
+                        'CANCEL',
+                        style: TextStyle(
+                          color: theme.textPrimary.withValues(alpha: 0.6),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton(
+                      onPressed: () async {
+                        final newName = nameController.text.trim();
+                        if (newName.isNotEmpty) {
+                          final oldName = _playerName;
+                          setState(() {
+                            _playerName = newName;
+                            for (int i = 0; i < _leaderboard.length; i++) {
+                              if (_leaderboard[i].playerName == oldName || _leaderboard[i].playerName == 'You') {
+                                _leaderboard[i] = LeaderboardEntry(
+                                  playerName: newName,
+                                  level: _leaderboard[i].level,
+                                  streak: _leaderboard[i].streak,
+                                  date: _leaderboard[i].date,
+                                );
+                              }
+                            }
+                          });
+                          await _prefs.setString('focus_spark_player_name', newName);
+                          final String jsonStr = jsonEncode(_leaderboard.map((e) => e.toJson()).toList());
+                          await _prefs.setString('focus_spark_hall_of_fame', jsonStr);
+                        }
+                        if (dialogCtx.mounted) {
+                          Navigator.of(dialogCtx).pop();
+                          _showLeaderboardModal(context, theme);
+                        }
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: theme.accentColor,
+                        foregroundColor: Colors.black87,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: const Text(
+                        'SAVE',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    ).then((_) {
+      nameController.dispose();
+    });
+  }
+
   // ── Leaderboard Modal ──────────────────────────────────────────────────
   void _showLeaderboardModal(BuildContext context, GameTheme theme) {
     HapticFeedback.selectionClick();
@@ -3077,10 +3248,45 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                               ),
                             ],
                           ),
-                          IconButton(
-                            onPressed: () => Navigator.of(context).pop(),
-                            icon: Icon(Icons.close_rounded,
-                                color: theme.textPrimary.withValues(alpha: 0.6)),
+                          Row(
+                            children: [
+                              InkWell(
+                                onTap: () {
+                                  Navigator.of(context).pop();
+                                  _showEditPlayerNameModal(context, theme);
+                                },
+                                borderRadius: BorderRadius.circular(10),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: theme.accentColor.withValues(alpha: 0.15),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: theme.accentColor.withValues(alpha: 0.4)),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.edit_rounded, size: 12, color: theme.accentColor),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        _playerName,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                          color: theme.accentColor,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              IconButton(
+                                onPressed: () => Navigator.of(context).pop(),
+                                icon: Icon(Icons.close_rounded,
+                                    color: theme.textPrimary.withValues(alpha: 0.6)),
+                              ),
+                            ],
                           ),
                         ],
                       ),
@@ -3109,6 +3315,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                   final entry = _leaderboard[index];
                                   final rank = index + 1;
                                   final isTop3 = rank <= 3;
+                                  final isCurrentUser = entry.playerName == _playerName || entry.playerName == 'You';
+
                                   Color badgeColor = theme.accentColor;
                                   if (rank == 1) badgeColor = const Color(0xFFFFD700);
                                   if (rank == 2) badgeColor = const Color(0xFFC0C0C0);
@@ -3118,15 +3326,29 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 14, vertical: 10),
                                     decoration: BoxDecoration(
-                                      color: isTop3
-                                          ? badgeColor.withValues(alpha: 0.12)
-                                          : theme.tileDefault.withValues(alpha: 0.3),
+                                      color: isCurrentUser
+                                          ? theme.accentColor.withValues(alpha: 0.22)
+                                          : (isTop3
+                                              ? badgeColor.withValues(alpha: 0.12)
+                                              : theme.tileDefault.withValues(alpha: 0.3)),
                                       borderRadius: BorderRadius.circular(14),
                                       border: Border.all(
-                                        color: isTop3
-                                            ? badgeColor.withValues(alpha: 0.4)
-                                            : theme.panelBorder.withValues(alpha: 0.3),
+                                        color: isCurrentUser
+                                            ? theme.accentColor
+                                            : (isTop3
+                                                ? badgeColor.withValues(alpha: 0.4)
+                                                : theme.panelBorder.withValues(alpha: 0.3)),
+                                        width: isCurrentUser ? 2.0 : 1.0,
                                       ),
+                                      boxShadow: isCurrentUser
+                                          ? [
+                                              BoxShadow(
+                                                color: theme.accentColor.withValues(alpha: 0.35),
+                                                blurRadius: 14,
+                                                spreadRadius: 1,
+                                              ),
+                                            ]
+                                          : null,
                                     ),
                                     child: Row(
                                       children: [
