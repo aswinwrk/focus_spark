@@ -137,17 +137,17 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   int _selectedThemeIndex = 0;
 
-  // ── Pentatonic frequencies (C4–D5) ──────────────────────────────────────
+  // ── Pure Consonant C-Major Pentatonic Scale Frequencies (C4–G5) ────────────
   static const List<double> _frequencies = [
-    261.63, // C4
-    293.66, // D4
-    329.63, // E4
-    349.23, // F4
-    392.00, // G4
-    440.00, // A4
-    493.88, // B4
-    523.25, // C5
-    587.33, // D5
+    261.63, // C4 (Tile 0 - Top Left)
+    293.66, // D4 (Tile 1 - Top Center)
+    329.63, // E4 (Tile 2 - Top Right)
+    392.00, // G4 (Tile 3 - Mid Left)
+    440.00, // A4 (Tile 4 - Center Tile)
+    523.25, // C5 (Tile 5 - Mid Right)
+    587.33, // D5 (Tile 6 - Bottom Left)
+    659.25, // E5 (Tile 7 - Bottom Center)
+    783.99, // G5 (Tile 8 - Bottom Right)
   ];
 
   // ── Game State ──────────────────────────────────────────────────────────
@@ -515,6 +515,14 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
   }
 
+  void _playWrongMoveTune() {
+    if (_isSfxMuted) return;
+    AudioService.instance.playTone(155.56, 0.15);
+    Future.delayed(const Duration(milliseconds: 110), () {
+      AudioService.instance.playTone(130.81, 0.25);
+    });
+  }
+
   // ── Praise Text Engine ───────────────────────────────────────────────────
   void _triggerPraiseText(String text, Color glowColor) {
     setState(() {
@@ -791,7 +799,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _correctErrorTile = _sequence[_playerInput.length];
       _hintedTile = null;
     });
-    if (!_isSfxMuted) AudioService.instance.playTone(130.81, 0.4);
+    _playWrongMoveTune();
 
     final failMsg = _getFailurePraiseText();
     _triggerPraiseText(failMsg, const Color(0xFFEF4444));
@@ -1160,7 +1168,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       });
       _saveGameProgress();
       _triggerHaptic(HapticType.error);
-      if (!_isSfxMuted) AudioService.instance.playTone(130.81, 0.4);
+      _playWrongMoveTune();
 
       final failMsg = _getFailurePraiseText();
       _triggerPraiseText(failMsg, const Color(0xFFEF4444));

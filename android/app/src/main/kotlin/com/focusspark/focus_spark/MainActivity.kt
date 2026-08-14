@@ -216,11 +216,16 @@ class MainActivity : FlutterActivity() {
         val amplitude  = Short.MAX_VALUE * 0.55           // 55% volume
 
         for (i in 0 until numSamples) {
-            val sample = amplitude * sin(2.0 * PI * frequency * i / SAMPLE_RATE)
+            val fundamental = sin(2.0 * PI * frequency * i / SAMPLE_RATE)
+            val harmonic = 0.25 * sin(4.0 * PI * frequency * i / SAMPLE_RATE)
+            val octaveSpark = 0.10 * sin(8.0 * PI * frequency * i / SAMPLE_RATE)
+            val rawSample = amplitude * (fundamental + harmonic + octaveSpark)
+
             val fadeIn  = if (i < fadeLen) 0.5 * (1 - cos(PI * i / fadeLen)) else 1.0
             val fadeOut = if (i >= numSamples - fadeLen)
                 0.5 * (1 - cos(PI * (numSamples - i) / fadeLen)) else 1.0
-            buffer[i] = (sample * fadeIn * fadeOut).toInt().toShort()
+
+            buffer[i] = (rawSample * fadeIn * fadeOut).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
         }
 
         val minBufSize = AudioTrack.getMinBufferSize(

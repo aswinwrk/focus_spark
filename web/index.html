@@ -66,22 +66,36 @@
     window.playSparkTone = function(frequency, duration) {
       try {
         window.initAudio();
-        const osc = window.audioCtx.createOscillator();
+        const osc1 = window.audioCtx.createOscillator();
+        const osc2 = window.audioCtx.createOscillator();
         const gainNode = window.audioCtx.createGain();
         
-        osc.connect(gainNode);
+        osc1.type = 'triangle';
+        osc1.frequency.setValueAtTime(frequency, window.audioCtx.currentTime);
+
+        osc2.type = 'sine';
+        osc2.frequency.setValueAtTime(frequency * 2.0, window.audioCtx.currentTime);
+
+        const gain1 = window.audioCtx.createGain();
+        const gain2 = window.audioCtx.createGain();
+        gain1.gain.value = 0.75;
+        gain2.gain.value = 0.25;
+
+        osc1.connect(gain1);
+        osc2.connect(gain2);
+        gain1.connect(gainNode);
+        gain2.connect(gainNode);
         gainNode.connect(window.audioCtx.destination);
         
-        osc.type = 'triangle'; // Warm, therapeutic chime waveform
-        osc.frequency.setValueAtTime(frequency, window.audioCtx.currentTime);
+        const now = window.audioCtx.currentTime;
+        gainNode.gain.setValueAtTime(0.001, now);
+        gainNode.gain.linearRampToValueAtTime(0.22, now + 0.015);
+        gainNode.gain.exponentialRampToValueAtTime(0.0001, now + duration);
         
-        // Attack-Decay envelope
-        gainNode.gain.setValueAtTime(0.001, window.audioCtx.currentTime);
-        gainNode.gain.linearRampToValueAtTime(0.25, window.audioCtx.currentTime + 0.02);
-        gainNode.gain.exponentialRampToValueAtTime(0.0001, window.audioCtx.currentTime + duration);
-        
-        osc.start(window.audioCtx.currentTime);
-        osc.stop(window.audioCtx.currentTime + duration);
+        osc1.start(now);
+        osc2.start(now);
+        osc1.stop(now + duration);
+        osc2.stop(now + duration);
       } catch (e) {
         console.error("Web Audio API error: ", e);
       }
