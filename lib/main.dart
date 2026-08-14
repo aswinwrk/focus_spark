@@ -1,11 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'services/audio_service.dart';
+import 'services/ad_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,6 +22,7 @@ void main() async {
   await SystemChrome.setEnabledSystemUIMode(
     SystemUiMode.immersiveSticky,
   );
+  await AdService.instance.initialize();
 
   runApp(const FocusSparkApp());
 }
@@ -78,6 +84,8 @@ class GameTheme {
   });
 }
 
+enum HapticType { light, medium, heavy, victory, error, heartbeat }
+
 // ---------------------------------------------------------------------------
 // Main Screen
 // ---------------------------------------------------------------------------
@@ -89,7 +97,7 @@ class FocusSparkScreen extends StatefulWidget {
 }
 
 class _FocusSparkScreenState extends State<FocusSparkScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   // ── Theme Presets ───────────────────────────────────────────────────────
   final List<GameTheme> _themes = const [
     GameTheme(
@@ -155,13 +163,35 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   int _sessionMaxLevel = 1;
   int _sessionMaxStreak = 0;
 
+  // Track the current playback session ID to cancel outdated async loops
+  int _playbackSessionId = 0;
+
+  // Level & Session Persistence
+  bool _hasSavedSession = false;
+
+  // Hall of Fame Leaderboard State
+  List<LeaderboardEntry> _leaderboard = [];
+
+  // Hint & Ad System State
+  int _freeHintsRemainingInLevel = 1;
+  bool _isAdActive = false;
+  int? _hintedTile;
+
+  // Tutorial display preferences
+  bool _hasSeenTutorial = false;
+  bool _showTutorialCard = true;
+
   bool _isZenMode = false;
-  bool _isMuted = false;
+  bool _isMusicMuted = false;
+  bool _isSfxMuted = false;
+  bool _isHapticsMuted = false;
+  String _playerName = 'You';
 
   // ── Tile Interaction State ───────────────────────────────────────────────
   int? _activePlaybackTile;
   int? _correctErrorTile;
   int? _activeTapTile;
+  int? _rippleTileIndex;
   final List<bool> _hoverStates = List.filled(9, false);
   List<double> _tileEntryScales = List.filled(9, 1.0);
 
@@ -175,37 +205,212 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   double _totalInputTime = 8.0;
   double _elapsedInputTime = 0.0;
 
-  // ── Particle Engine ──────────────────────────────────────────────────────
+  // ── Particle & Ad Engine ──────────────────────────────────────────────────
   late ParticleManager _particleManager;
+  late AnimationController _praiseController;
+  late Animation<double> _praiseScaleAnimation;
+  late Animation<double> _praiseOpacityAnimation;
+  String? _activePraiseText;
+  Color _activePraiseColor = const Color(0xFFA78BFA);
 
+  int _splashStage = 0;
   late SharedPreferences _prefs;
   final math.Random _random = math.Random();
+  BannerAd? _bannerAd;
+  bool _isBannerAdLoaded = false;
+  String _activeAdType = 'REWARDED VIDEO TEST AD';
 
-  // ── Lifecycle ────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _particleManager = ParticleManager(this);
+
+    _praiseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    );
+
+    _praiseScaleAnimation = CurvedAnimation(
+      parent: _praiseController,
+      curve: const Interval(0.0, 0.6, curve: Curves.elasticOut),
+    );
+
+    _praiseOpacityAnimation = CurvedAnimation(
+      parent: _praiseController,
+      curve: const Interval(0.65, 1.0, curve: Curves.easeOut),
+    );
+
     _loadSettings();
+    _initAdMobBanner();
+
+    AdService.instance.onAdOpened = () {
+      if (!mounted) return;
+      AudioService.instance.stopAmbientMusic();
+      _cancelInputTimer();
+      if (_gameState == GameState.playerInput) {
+        setState(() {
+          _gameState = GameState.paused;
+        });
+      }
+    };
+
+    AdService.instance.onAdClosed = () {
+      if (!mounted) return;
+      if (!_isMusicMuted) {
+        AudioService.instance.startAmbientMusic();
+      }
+    };
+  }
+
+  void _initAdMobBanner() async {
+    _bannerAd = await AdService.instance.createBannerAd(
+      onAdLoaded: (ad) {
+        if (mounted) setState(() => _isBannerAdLoaded = true);
+      },
+      onAdFailedToLoad: (ad, error) {
+        ad.dispose();
+        if (mounted) {
+          setState(() => _isBannerAdLoaded = false);
+          // Retry loading banner ad after 4 seconds
+          Timer(const Duration(seconds: 4), () {
+            if (mounted && !_isBannerAdLoaded) {
+              _initAdMobBanner();
+            }
+          });
+        }
+      },
+    );
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _praiseController.dispose();
+    _bannerAd?.dispose();
     _particleManager.disposeTicker();
     _particleManager.dispose();
     _cancelInputTimer();
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden) {
+      AudioService.instance.stopAmbientMusic();
+      _cancelInputTimer();
+      if (_gameState == GameState.playerInput || _gameState == GameState.playback) {
+        setState(() {
+          _gameState = GameState.paused;
+          _activePlaybackTile = null;
+        });
+        _saveGameProgress();
+      }
+    } else if (state == AppLifecycleState.resumed) {
+      if (!_isMusicMuted && _splashStage == 2) {
+        AudioService.instance.startAmbientMusic();
+      }
+    }
+  }
+
   // ── Persistence ─────────────────────────────────────────────────────────
   Future<void> _loadSettings() async {
     _prefs = await SharedPreferences.getInstance();
+    final bool hasSavedGame = _prefs.getBool('focus_spark_has_active_game') ?? false;
+    final int savedLevel = _prefs.getInt('focus_spark_current_level') ?? 1;
+    final int savedStreak = _prefs.getInt('focus_spark_current_streak') ?? 0;
+    final String seqStr = _prefs.getString('focus_spark_current_sequence') ?? '';
+
+    List<int> loadedSequence = [];
+    if (hasSavedGame && seqStr.isNotEmpty) {
+      try {
+        loadedSequence = seqStr
+            .split(',')
+            .where((e) => e.trim().isNotEmpty)
+            .map((e) => int.parse(e.trim()))
+            .toList();
+      } catch (_) {
+        loadedSequence = [];
+      }
+    }
+
     setState(() {
       _highScore = _prefs.getInt('focus_spark_high_score') ?? 0;
       _isZenMode = _prefs.getBool('focus_spark_zen_mode') ?? false;
-      _isMuted = _prefs.getBool('focus_spark_is_muted') ?? false;
+      _isMusicMuted = _prefs.getBool('focus_spark_is_music_muted') ?? false;
+      _isSfxMuted = _prefs.getBool('focus_spark_is_sfx_muted') ?? false;
+      _isHapticsMuted = _prefs.getBool('focus_spark_is_haptics_muted') ?? false;
+      _playerName = _prefs.getString('focus_spark_player_name') ?? 'You';
       _selectedThemeIndex = _prefs.getInt('focus_spark_theme_index') ?? 0;
+      _hasSeenTutorial = _prefs.getBool('focus_spark_has_seen_tutorial') ?? false;
+      _showTutorialCard = !_hasSeenTutorial;
+
+      if (hasSavedGame && loadedSequence.isNotEmpty) {
+        _hasSavedSession = true;
+        _level = savedLevel > 0 ? savedLevel : 1;
+        _currentStreak = savedStreak;
+        _sequence.clear();
+        _sequence.addAll(loadedSequence);
+      } else {
+        _hasSavedSession = false;
+        _level = 1;
+        _currentStreak = 0;
+        _sequence.clear();
+      }
+
+      if (_level > _highScore) {
+        _highScore = _level;
+        _prefs.setInt('focus_spark_high_score', _highScore);
+      }
+
+      if (!_isMusicMuted) {
+        AudioService.instance.startAmbientMusic();
+      } else {
+        AudioService.instance.stopAmbientMusic();
+      }
+
+      // Load Hall of Fame Leaderboard
+      final String leaderboardStr = _prefs.getString('focus_spark_hall_of_fame') ?? '';
+      List<LeaderboardEntry> loadedLeaderboard = [];
+      if (leaderboardStr.isNotEmpty) {
+        try {
+          final List<dynamic> jsonList = jsonDecode(leaderboardStr) as List<dynamic>;
+          loadedLeaderboard = jsonList
+              .map((e) => LeaderboardEntry.fromJson(e as Map<String, dynamic>))
+              .toList();
+        } catch (_) {
+          loadedLeaderboard = [];
+        }
+      }
+
+      if (loadedLeaderboard.isEmpty) {
+        // Initial seed entries
+        final now = DateTime.now();
+        loadedLeaderboard = [
+          LeaderboardEntry(playerName: 'Zen Master', level: 12, streak: 12, date: now.subtract(const Duration(days: 1))),
+          LeaderboardEntry(playerName: 'Mindful Seeker', level: 9, streak: 9, date: now.subtract(const Duration(days: 3))),
+          LeaderboardEntry(playerName: 'Focus Sparker', level: 7, streak: 7, date: now.subtract(const Duration(days: 5))),
+          LeaderboardEntry(playerName: 'Memory Runner', level: 5, streak: 5, date: now.subtract(const Duration(days: 7))),
+          LeaderboardEntry(playerName: 'Calm Thinker', level: 3, streak: 3, date: now.subtract(const Duration(days: 9))),
+        ];
+      }
+      _leaderboard = _deduplicateLeaderboardEntries(loadedLeaderboard);
     });
+  }
+
+  Future<void> _saveGameProgress() async {
+    if (!mounted) return;
+    await _prefs.setBool('focus_spark_has_active_game', true);
+    await _prefs.setInt('focus_spark_current_level', _level);
+    await _prefs.setInt('focus_spark_current_streak', _currentStreak);
+    await _prefs.setString('focus_spark_current_sequence', _sequence.join(','));
+    if (!_hasSavedSession) {
+      setState(() {
+        _hasSavedSession = true;
+      });
+    }
   }
 
   Future<void> _updateHighScore(int score) async {
@@ -213,14 +418,167 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     await _prefs.setInt('focus_spark_high_score', score);
   }
 
+  List<LeaderboardEntry> _deduplicateLeaderboardEntries(List<LeaderboardEntry> entries) {
+    final Map<String, LeaderboardEntry> bestEntries = {};
+    for (final entry in entries) {
+      final existing = bestEntries[entry.playerName];
+      if (existing == null) {
+        bestEntries[entry.playerName] = entry;
+      } else {
+        if (entry.level > existing.level || (entry.level == existing.level && entry.streak > existing.streak)) {
+          bestEntries[entry.playerName] = entry;
+        }
+      }
+    }
+    final List<LeaderboardEntry> result = bestEntries.values.toList();
+    result.sort((a, b) {
+      int cmp = b.level.compareTo(a.level);
+      if (cmp == 0) return b.streak.compareTo(a.streak);
+      return cmp;
+    });
+    return result;
+  }
+
+  Future<void> _recordLeaderboardScore(int level, int streak) async {
+    if (level <= 1 && streak <= 0) return;
+
+    final existingIdx = _leaderboard.indexWhere((e) => e.playerName == _playerName || e.playerName == 'You');
+    if (existingIdx != -1) {
+      final existing = _leaderboard[existingIdx];
+      if (level > existing.level || (level == existing.level && streak > existing.streak)) {
+        _leaderboard[existingIdx] = LeaderboardEntry(
+          playerName: _playerName,
+          level: level,
+          streak: streak,
+          date: DateTime.now(),
+        );
+      } else {
+        _leaderboard[existingIdx] = LeaderboardEntry(
+          playerName: _playerName,
+          level: existing.level,
+          streak: existing.streak,
+          date: existing.date,
+        );
+      }
+    } else {
+      _leaderboard.add(LeaderboardEntry(
+        playerName: _playerName,
+        level: level,
+        streak: streak,
+        date: DateTime.now(),
+      ));
+    }
+
+    _leaderboard = _deduplicateLeaderboardEntries(_leaderboard);
+
+    if (_leaderboard.length > 10) {
+      _leaderboard = _leaderboard.sublist(0, 10);
+    }
+
+    final String jsonStr = jsonEncode(_leaderboard.map((e) => e.toJson()).toList());
+    await _prefs.setString('focus_spark_hall_of_fame', jsonStr);
+    if (mounted) setState(() {});
+  }
+
+  // ── Haptic Engine Helper ──────────────────────────────────────────────────
+  void _triggerHaptic(HapticType type) {
+    if (_isHapticsMuted) return;
+    switch (type) {
+      case HapticType.light:
+        HapticFeedback.lightImpact();
+        AudioService.instance.vibrate(durationMs: 55);
+        break;
+      case HapticType.medium:
+        HapticFeedback.mediumImpact();
+        AudioService.instance.vibrate(durationMs: 75);
+        break;
+      case HapticType.heavy:
+        HapticFeedback.heavyImpact();
+        AudioService.instance.vibrate(durationMs: 110);
+        break;
+      case HapticType.victory:
+        HapticFeedback.heavyImpact();
+        AudioService.instance.vibrate(durationMs: 120);
+        Future.delayed(const Duration(milliseconds: 140), () {
+          HapticFeedback.lightImpact();
+          AudioService.instance.vibrate(durationMs: 60);
+        });
+        break;
+      case HapticType.error:
+        HapticFeedback.vibrate();
+        AudioService.instance.vibrate(durationMs: 160);
+        break;
+      case HapticType.heartbeat:
+        HapticFeedback.selectionClick();
+        AudioService.instance.vibrate(durationMs: 40);
+        break;
+    }
+  }
+
+  // ── Praise Text Engine ───────────────────────────────────────────────────
+  void _triggerPraiseText(String text, Color glowColor) {
+    setState(() {
+      _activePraiseText = text;
+      _activePraiseColor = glowColor;
+    });
+    _praiseController.forward(from: 0.0);
+  }
+
+  String _getPraiseForLevel(int completedLevel) {
+    final List<String> tier1 = ['NICE FOCUS! 🎯', 'SPARK! ⚡', 'SHARP! ⚔️', 'SMART MOVE! 💡'];
+    final List<String> tier2 = ['SYNAPSE SURGE! ⚡', 'BRILLIANT! 🌟', 'HYPER FOCUS! 👁️', 'LASER MATRIX! 🔮'];
+    final List<String> tier3 = ['SUPERCHARGED! 🔋', 'BRAIN POWER! 🧠', 'UNSTOPPABLE! 🚀', 'LIGHTNING MIND! ⚡'];
+    final List<String> tier4 = ['MASTERMIND! 👑', 'MIND BENDER! 🔮', 'CYBER OVERLORD! 🌐', 'ULTIMATE SPARK! 💥'];
+
+    if (completedLevel <= 4) {
+      return tier1[_random.nextInt(tier1.length)];
+    } else if (completedLevel <= 9) {
+      return tier2[_random.nextInt(tier2.length)];
+    } else if (completedLevel <= 14) {
+      return tier3[_random.nextInt(tier3.length)];
+    } else {
+      return tier4[_random.nextInt(tier4.length)];
+    }
+  }
+
+  String _getFailurePraiseText() {
+    return 'TRY AGAIN! 🔄';
+  }
+
   Future<void> _toggleZenMode() async {
     setState(() => _isZenMode = !_isZenMode);
     await _prefs.setBool('focus_spark_zen_mode', _isZenMode);
   }
 
-  Future<void> _toggleMute() async {
-    setState(() => _isMuted = !_isMuted);
-    await _prefs.setBool('focus_spark_is_muted', _isMuted);
+  Future<void> _toggleMusic() async {
+    HapticFeedback.selectionClick();
+    setState(() {
+      _isMusicMuted = !_isMusicMuted;
+    });
+    await _prefs.setBool('focus_spark_is_music_muted', _isMusicMuted);
+    if (_isMusicMuted) {
+      AudioService.instance.stopAmbientMusic();
+    } else {
+      AudioService.instance.startAmbientMusic();
+    }
+  }
+
+  void _toggleSfx() async {
+    _triggerHaptic(HapticType.light);
+    setState(() {
+      _isSfxMuted = !_isSfxMuted;
+    });
+    await _prefs.setBool('focus_spark_is_sfx_muted', _isSfxMuted);
+  }
+
+  void _toggleHaptics() async {
+    if (_isHapticsMuted) {
+      HapticFeedback.lightImpact();
+    }
+    setState(() {
+      _isHapticsMuted = !_isHapticsMuted;
+    });
+    await _prefs.setBool('focus_spark_is_haptics_muted', _isHapticsMuted);
   }
 
   Future<void> _selectTheme(int index) async {
@@ -244,38 +602,112 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   void _spawnSuccessSparks(Color color) {
     _particleManager.spawnSparks(_gridWidth / 2, _gridHeight / 2, color, 60);
+    _particleManager.spawnConfettiBurst(_gridWidth / 2, _gridHeight / 2, 45);
+  }
+
+  Future<void> _triggerGridRippleWave() async {
+    for (int i = 0; i < 9; i++) {
+      if (!mounted) return;
+      setState(() => _rippleTileIndex = i);
+      if (!_isSfxMuted) {
+        AudioService.instance.playTone(_frequencies[i], 0.08);
+      }
+      await Future.delayed(const Duration(milliseconds: 40));
+    }
+    if (mounted) {
+      setState(() => _rippleTileIndex = null);
+    }
   }
 
   // ── Session Control ──────────────────────────────────────────────────────
   void _startSession() async {
+    void launchGame() {
+      if (!mounted) return;
+      _cancelInputTimer();
+      _particleManager.clear();
+      _playbackSessionId++;
+      final currentSession = _playbackSessionId;
+      HapticFeedback.mediumImpact();
+
+      setState(() {
+        if (!_hasSeenTutorial) {
+          _hasSeenTutorial = true;
+          _showTutorialCard = false;
+          _prefs.setBool('focus_spark_has_seen_tutorial', true);
+        }
+        _gameState = GameState.playback;
+        _sequence.clear();
+        _playerInput.clear();
+        _level = 1;
+        _currentStreak = 0;
+        _sessionMaxLevel = 1;
+        _sessionMaxStreak = 0;
+        _showSessionSummary = false;
+        _freeHintsRemainingInLevel = 1;
+        _hintedTile = null;
+        _tileEntryScales = List.filled(9, 0.0);
+      });
+
+      _saveGameProgress();
+
+      // Staggered tile entry animation then run playback
+      Future.microtask(() async {
+        for (int i = 0; i < 9; i++) {
+          await Future.delayed(const Duration(milliseconds: 60));
+          if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
+          setState(() => _tileEntryScales[i] = 1.0);
+        }
+
+        if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
+        setState(() => _sequence.add(_random.nextInt(9)));
+        _runPlayback();
+      });
+    }
+
+    launchGame();
+  }
+
+  void _continueSession() async {
     _cancelInputTimer();
     _particleManager.clear();
+    _playbackSessionId++;
+    final currentSession = _playbackSessionId;
+    HapticFeedback.mediumImpact();
+
     setState(() {
+      if (!_hasSeenTutorial) {
+        _hasSeenTutorial = true;
+        _showTutorialCard = false;
+        _prefs.setBool('focus_spark_has_seen_tutorial', true);
+      }
       _gameState = GameState.playback;
-      _sequence.clear();
       _playerInput.clear();
-      _level = 1;
-      _currentStreak = 0;
-      _sessionMaxLevel = 1;
-      _sessionMaxStreak = 0;
       _showSessionSummary = false;
+      _freeHintsRemainingInLevel = 1;
+      _hintedTile = null;
       _tileEntryScales = List.filled(9, 0.0);
     });
 
     // Staggered tile entry animation
     for (int i = 0; i < 9; i++) {
       await Future.delayed(const Duration(milliseconds: 60));
-      if (!mounted || _gameState == GameState.startScreen) return;
+      if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
       setState(() => _tileEntryScales[i] = 1.0);
     }
 
-    setState(() => _sequence.add(_random.nextInt(9)));
+    if (_playbackSessionId != currentSession) return;
+    if (_sequence.isEmpty) {
+      _level = 1;
+      _sequence.add(_random.nextInt(9));
+      await _saveGameProgress();
+    }
     _runPlayback();
   }
 
   // ── Playback Engine ──────────────────────────────────────────────────────
   Future<void> _runPlayback() async {
     if (_gameState != GameState.playback) return;
+    final currentSession = _playbackSessionId;
 
     // Adaptive speed: Max(380ms, 650ms - level*25ms)
     final int speedMs = (650 - (_level * 25)).clamp(380, 650);
@@ -284,10 +716,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     // Brief pre-playback pause so user can settle
     await Future.delayed(const Duration(milliseconds: 300));
-    if (_gameState != GameState.playback) return;
+    if (_gameState != GameState.playback || _playbackSessionId != currentSession) return;
 
     for (int i = 0; i < _sequence.length; i++) {
-      if (_gameState != GameState.playback) return;
+      if (_gameState != GameState.playback || _playbackSessionId != currentSession) return;
       final tileIndex = _sequence[i];
 
       setState(() => _activePlaybackTile = tileIndex);
@@ -295,18 +727,18 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       final theme = _themes[_selectedThemeIndex];
       _spawnTileSparks(tileIndex, theme.tileActiveGlow.withValues(alpha: 0.35));
 
-      if (!_isMuted) {
+      if (!_isSfxMuted) {
         AudioService.instance.playTone(_frequencies[tileIndex], activeMs / 1000.0);
       }
 
       await Future.delayed(Duration(milliseconds: activeMs));
-      if (_gameState != GameState.playback) return;
+      if (_gameState != GameState.playback || _playbackSessionId != currentSession) return;
 
       setState(() => _activePlaybackTile = null);
       await Future.delayed(Duration(milliseconds: gapMs));
     }
 
-    if (_gameState == GameState.playback) {
+    if (_gameState == GameState.playback && _playbackSessionId == currentSession) {
       setState(() {
         _gameState = GameState.playerInput;
         _playerInput.clear();
@@ -335,6 +767,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       if (_elapsedInputTime >= _totalInputTime) {
         _cancelInputTimer();
         _handleTimeout();
+      } else {
+        // Heartbeat haptic pulse during critical time (< 20%)
+        final pct = _inputTimerPercentage.clamp(0.0, 1.0);
+        if (pct <= 0.20 && (timer.tick % 10 == 0)) {
+          _triggerHaptic(HapticType.heartbeat);
+        }
       }
     });
   }
@@ -346,13 +784,17 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   void _handleTimeout() {
     if (_gameState != GameState.playerInput) return;
+    _triggerHaptic(HapticType.error);
     setState(() {
       _gameState = GameState.errorTransition;
       _currentStreak = 0;
       _correctErrorTile = _sequence[_playerInput.length];
+      _hintedTile = null;
     });
-    HapticFeedback.vibrate();
-    if (!_isMuted) AudioService.instance.playTone(130.81, 0.4);
+    if (!_isSfxMuted) AudioService.instance.playTone(130.81, 0.4);
+
+    final failMsg = _getFailurePraiseText();
+    _triggerPraiseText(failMsg, const Color(0xFFEF4444));
 
     Future.delayed(const Duration(milliseconds: 1200), () {
       if (mounted && _gameState == GameState.errorTransition) {
@@ -382,10 +824,241 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
   }
 
+  // ── Hint & Direct Rewarded Ad System ────────────────────────────────────
+  void _triggerHint() {
+    if (_gameState != GameState.playerInput || _playerInput.length >= _sequence.length) return;
+    final nextTile = _sequence[_playerInput.length];
+    final theme = _themes[_selectedThemeIndex];
+
+    _spawnTileSparks(nextTile, theme.tileActiveGlow);
+
+    setState(() {
+      _hintedTile = nextTile;
+    });
+
+    HapticFeedback.mediumImpact();
+  }
+
+  void _onHintPressed() {
+    if (_gameState != GameState.playerInput || _isAdActive) return;
+
+    if (_freeHintsRemainingInLevel > 0) {
+      setState(() {
+        _freeHintsRemainingInLevel--;
+      });
+      _triggerHint();
+    } else {
+      _playDirectRewardedAd();
+    }
+  }
+
+  void _showTestInterstitialOverlay({VoidCallback? onDismissed}) async {
+    if (_isAdActive) return;
+    _cancelInputTimer();
+    HapticFeedback.mediumImpact();
+
+    setState(() {
+      _isAdActive = true;
+      _activeAdType = 'INTERSTITIAL TEST AD';
+    });
+
+    await Future.delayed(const Duration(milliseconds: 2500));
+
+    if (!mounted) return;
+
+    setState(() {
+      _isAdActive = false;
+    });
+
+    onDismissed?.call();
+  }
+
+  void _playDirectRewardedAd() async {
+    if (_isAdActive) return;
+    _cancelInputTimer();
+    HapticFeedback.mediumImpact();
+
+    final shown = await AdService.instance.showRewardedAdOrLoad(
+      onUserEarnedReward: (reward) {
+        if (_gameState == GameState.playerInput && mounted) {
+          _startInputTimer();
+          _triggerHint();
+        }
+      },
+    );
+
+    if (shown) return;
+
+    // Fallback visible test ad overlay for rewarded ad
+    setState(() {
+      _isAdActive = true;
+      _activeAdType = 'REWARDED VIDEO TEST AD';
+    });
+
+    await Future.delayed(const Duration(milliseconds: 3000));
+
+    if (!mounted) return;
+
+    setState(() {
+      _isAdActive = false;
+    });
+
+    if (_gameState == GameState.playerInput) {
+      _startInputTimer();
+      _triggerHint();
+    }
+  }
+
+  Widget _buildDirectAdOverlay(GameTheme theme) {
+    if (!_isAdActive) return const SizedBox.shrink();
+    final isRewarded = _activeAdType.contains('REWARDED');
+
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black.withValues(alpha: 0.94),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+              decoration: BoxDecoration(
+                color: theme.panelBg,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: const Color(0xFF4285F4).withValues(alpha: 0.6),
+                  width: 1.5,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF4285F4).withValues(alpha: 0.3),
+                    blurRadius: 32,
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Google AdMob Test Ad Header Tag
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFEA4335),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text(
+                          'Ad',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Google AdMob Test Ad',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1.0,
+                          color: theme.textPrimary.withValues(alpha: 0.85),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+
+                  // Center Ad Icon
+                  Icon(
+                    isRewarded ? Icons.ondemand_video_rounded : Icons.branding_watermark_rounded,
+                    color: const Color(0xFF4285F4),
+                    size: 48,
+                  ),
+                  const SizedBox(height: 16),
+
+                  Text(
+                    _activeAdType,
+                    style: TextStyle(
+                      color: theme.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 2.0,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    isRewarded
+                        ? 'Watching Test Video... Reward: +1 Free Hint'
+                        : 'Google Test Interstitial Ad View',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: theme.textPrimary.withValues(alpha: 0.65),
+                      fontSize: 11,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Progress loading indicator
+                  const SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF4285F4)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Ad Unit ID Subtitle
+                  Text(
+                    isRewarded
+                        ? 'Unit ID: ca-app-pub-3940256099942544/5224354917'
+                        : 'Unit ID: ca-app-pub-3940256099942544/1033173712',
+                    style: TextStyle(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w600,
+                      color: theme.textPrimary.withValues(alpha: 0.4),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Go Home ──────────────────────────────────────────────────────────────
+  void _goHome() async {
+    _cancelInputTimer();
+    _particleManager.clear();
+    _playbackSessionId++; // Cancel any active async playback loops
+
+    if (_sequence.isNotEmpty) {
+      await _saveGameProgress();
+    }
+
+    setState(() {
+      _gameState = GameState.startScreen;
+      _activePlaybackTile = null;
+      _correctErrorTile = null;
+      _activeTapTile = null;
+      _hintedTile = null;
+      _tileEntryScales = List.filled(9, 1.0);
+      _inputTimerPercentage = 1.0;
+    });
+    HapticFeedback.selectionClick();
+  }
+
   // ── Reset Session ────────────────────────────────────────────────────────
   void _resetSession() {
     _cancelInputTimer();
     _particleManager.clear();
+    _playbackSessionId++; // Cancel any active async playback loops
 
     // Capture session summary before reset
     final lvl = _level;
@@ -401,6 +1074,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _activePlaybackTile = null;
       _correctErrorTile = null;
       _activeTapTile = null;
+      _hintedTile = null;
       _tileEntryScales = List.filled(9, 1.0);
       _inputTimerPercentage = 1.0;
       if (wasMeaningful) {
@@ -423,6 +1097,14 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void _handleTileClick(int clickedIndex) {
     if (_gameState != GameState.playerInput) return;
 
+    _triggerHaptic(HapticType.light);
+
+    if (_hintedTile != null) {
+      setState(() {
+        _hintedTile = null;
+      });
+    }
+
     final expectedIndex = _sequence[_playerInput.length];
     final theme = _themes[_selectedThemeIndex];
 
@@ -432,34 +1114,39 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       if (_playerInput.length == _sequence.length) {
         // SUCCESS
         _cancelInputTimer();
+        final completedLevel = _level;
         setState(() {
           _gameState = GameState.successTransition;
           _currentStreak++;
           _level++;
+          _freeHintsRemainingInLevel = 1;
           if (_level > _sessionMaxLevel) _sessionMaxLevel = _level;
           if (_currentStreak > _sessionMaxStreak) _sessionMaxStreak = _currentStreak;
+          if (_level > _highScore) {
+            _highScore = _level;
+            _prefs.setInt('focus_spark_high_score', _highScore);
+          }
         });
-        if (_currentStreak > _highScore) _updateHighScore(_currentStreak);
+        _recordLeaderboardScore(completedLevel, _currentStreak);
 
-        HapticFeedback.mediumImpact();
-        Future.delayed(const Duration(milliseconds: 80), () => HapticFeedback.mediumImpact());
-
+        _triggerHaptic(HapticType.victory);
         _spawnSuccessSparks(theme.accentColor);
+        _triggerGridRippleWave();
 
-        if (!_isMuted) {
-          // Play a rising success arpeggio
-          AudioService.instance.playTone(523.25, 0.18);
+        // Trigger Focus Praise Text Popup!
+        final praiseMsg = _getPraiseForLevel(completedLevel);
+        _triggerPraiseText(praiseMsg, theme.accentColor);
+
+        if (!_isSfxMuted) {
+          final frequency = _frequencies[clickedIndex];
+          AudioService.instance.playTone(frequency, 0.25);
           Future.delayed(const Duration(milliseconds: 120),
               () => AudioService.instance.playTone(587.33, 0.22));
         }
 
         Future.delayed(const Duration(milliseconds: 850), () {
           if (mounted && _gameState == GameState.successTransition) {
-            setState(() {
-              _gameState = GameState.playback;
-              _sequence.add(_random.nextInt(9));
-            });
-            _runPlayback();
+            _showLevelCompletedModal(context, theme, completedLevel);
           }
         });
       }
@@ -471,8 +1158,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _currentStreak = 0;
         _correctErrorTile = expectedIndex;
       });
-      HapticFeedback.vibrate();
-      if (!_isMuted) AudioService.instance.playTone(130.81, 0.4);
+      _saveGameProgress();
+      _triggerHaptic(HapticType.error);
+      if (!_isSfxMuted) AudioService.instance.playTone(130.81, 0.4);
+
+      final failMsg = _getFailurePraiseText();
+      _triggerPraiseText(failMsg, const Color(0xFFEF4444));
 
       Future.delayed(const Duration(milliseconds: 1200), () {
         if (mounted && _gameState == GameState.errorTransition) {
@@ -511,10 +1202,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     final bool isPlaybackFlash =
         _gameState == GameState.playback && _activePlaybackTile == index;
     final bool isTapFlash = _activeTapTile == index;
+    final bool isHinted = _hintedTile == index;
+    final bool isRippleFlash = _rippleTileIndex == index;
     final bool isErrorFlash =
         _gameState == GameState.errorTransition && _correctErrorTile == index;
     final bool isSuccess = _gameState == GameState.successTransition;
-    final bool isFlashing = isPlaybackFlash || isTapFlash;
+    final bool isFlashing = isPlaybackFlash || isTapFlash || isHinted || isRippleFlash;
     final bool inputLock = _gameState != GameState.playerInput;
 
     double scale = _tileEntryScales[index];
@@ -568,77 +1261,81 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _playerInput.isNotEmpty &&
         _playerInput.last == index;
 
-    return MouseRegion(
-      cursor: inputLock ? SystemMouseCursors.basic : SystemMouseCursors.click,
-      onEnter: (_) {
-        if (!inputLock) setState(() => _hoverStates[index] = true);
-      },
-      onExit: (_) => setState(() => _hoverStates[index] = false),
-      child: GestureDetector(
-        onTapDown: (_) {
-          if (!inputLock) {
-            setState(() => _activeTapTile = index);
-            _spawnTileSparks(index, theme.tileActiveGlow);
-            HapticFeedback.selectionClick();
-            if (!_isMuted) {
-              AudioService.instance.playTone(_frequencies[index], 0.22);
+    return _HintTilePulse(
+      isHinted: isHinted,
+      pulseColor: theme.tileActiveGlow,
+      child: MouseRegion(
+        cursor: inputLock ? SystemMouseCursors.basic : SystemMouseCursors.click,
+        onEnter: (_) {
+          if (!inputLock) setState(() => _hoverStates[index] = true);
+        },
+        onExit: (_) => setState(() => _hoverStates[index] = false),
+        child: GestureDetector(
+          onTapDown: (_) {
+            if (!inputLock) {
+              setState(() => _activeTapTile = index);
+              _spawnTileSparks(index, theme.tileActiveGlow);
+              HapticFeedback.selectionClick();
+              if (!_isSfxMuted) {
+                AudioService.instance.playTone(_frequencies[index], 0.22);
+              }
             }
-          }
-        },
-        onTapUp: (_) {
-          if (_activeTapTile == index) {
-            setState(() => _activeTapTile = null);
-            _handleTileClick(index);
-          }
-        },
-        onTapCancel: () {
-          if (_activeTapTile == index) setState(() => _activeTapTile = null);
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 130),
-          curve: Curves.easeOutCubic,
-          transform: Matrix4.identity()
-            ..translate(0.0, translateY)
-            ..scale(scale),
-          decoration: BoxDecoration(
-            color: tileColor,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: isErrorFlash
-                  ? const Color(0xFFEF4444)
-                  : isSuccess
-                      ? theme.successColor.withValues(alpha: 0.5)
-                      : isFlashing
-                          ? theme.tileActiveGlow
-                          : playerHitHighlight
-                              ? theme.accentColor.withValues(alpha: 0.6)
-                              : theme.panelBorder.withValues(alpha: 0.45),
-              width: isFlashing || isErrorFlash || isSuccess ? 2.0 : 1.0,
+          },
+          onTapUp: (_) {
+            if (_activeTapTile == index) {
+              setState(() => _activeTapTile = null);
+              _handleTileClick(index);
+            }
+          },
+          onTapCancel: () {
+            if (_activeTapTile == index) setState(() => _activeTapTile = null);
+          },
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 130),
+            curve: Curves.easeOutCubic,
+            transform: Matrix4.identity()
+              ..translate(0.0, translateY)
+              ..scale(scale),
+            decoration: BoxDecoration(
+              color: tileColor,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: isErrorFlash
+                    ? const Color(0xFFEF4444)
+                    : isSuccess
+                        ? theme.successColor.withValues(alpha: 0.5)
+                        : isFlashing
+                            ? theme.tileActiveGlow
+                            : playerHitHighlight
+                                ? theme.accentColor.withValues(alpha: 0.6)
+                                : theme.panelBorder.withValues(alpha: 0.45),
+                width: isFlashing || isErrorFlash || isSuccess ? 2.0 : 1.0,
+              ),
+              boxShadow: glowShadow != null
+                  ? [glowShadow]
+                  : [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.2),
+                        blurRadius: 6,
+                        offset: const Offset(0, 4),
+                      )
+                    ],
             ),
-            boxShadow: glowShadow != null
-                ? [glowShadow]
-                : [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.2),
-                      blurRadius: 6,
-                      offset: const Offset(0, 4),
-                    )
-                  ],
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-              child: Center(
-                child: AnimatedOpacity(
-                  opacity: isFlashing || isErrorFlash || isSuccess ? 0.0 : (inputLock ? 0.0 : 0.15),
-                  duration: const Duration(milliseconds: 200),
-                  child: Text(
-                    '${index + 1}',
-                    style: TextStyle(
-                      color: theme.textPrimary,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w300,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                child: Center(
+                  child: AnimatedOpacity(
+                    opacity: isFlashing || isErrorFlash || isSuccess ? 0.0 : (inputLock ? 0.0 : 0.15),
+                    duration: const Duration(milliseconds: 200),
+                    child: Text(
+                      '${index + 1}',
+                      style: TextStyle(
+                        color: theme.textPrimary,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w300,
+                      ),
                     ),
                   ),
                 ),
@@ -650,20 +1347,178 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     );
   }
 
+  // ── Input Timer Bar ──────────────────────────────────────────────────────
+  Widget _buildInputTimerBar(GameTheme theme) {
+    final remainingSecs = math.max(0.0, _totalInputTime - _elapsedInputTime);
+    final pct = _inputTimerPercentage.clamp(0.0, 1.0);
+
+    final Color barColor;
+    final Color glowColor;
+    final String statusText;
+    final IconData statusIcon;
+
+    if (pct > 0.40) {
+      barColor = theme.accentColor;
+      glowColor = theme.tileActiveGlow;
+      statusText = 'TIME REMAINING';
+      statusIcon = Icons.timer_outlined;
+    } else if (pct > 0.20) {
+      barColor = const Color(0xFFF59E0B);
+      glowColor = const Color(0xFFFBBF24);
+      statusText = 'HURRY UP!';
+      statusIcon = Icons.bolt_rounded;
+    } else {
+      barColor = const Color(0xFFEF4444);
+      glowColor = const Color(0xFFF87171);
+      statusText = 'CRITICAL TIME!';
+      statusIcon = Icons.warning_amber_rounded;
+    }
+
+    return AnimatedOpacity(
+      opacity: _gameState == GameState.playerInput ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 250),
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 14.0),
+        child: Column(
+          children: [
+            // Header Row: Status Tag & Digital Seconds Counter
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(statusIcon, size: 12, color: barColor),
+                    const SizedBox(width: 4),
+                    Text(
+                      statusText,
+                      style: GoogleFonts.orbitron(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.1,
+                        color: barColor,
+                      ),
+                    ),
+                  ],
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2.5),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.35),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: barColor.withValues(alpha: 0.4)),
+                  ),
+                  child: Text(
+                    '${remainingSecs.toStringAsFixed(1)}s',
+                    style: GoogleFonts.orbitron(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.0,
+                      color: barColor,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+
+            // Neon Capsule Energy Track
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final trackWidth = constraints.maxWidth;
+                final barWidth = trackWidth * pct;
+
+                return Container(
+                  height: 10,
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.4),
+                    borderRadius: BorderRadius.circular(30),
+                    border: Border.all(
+                      color: barColor.withValues(alpha: 0.35),
+                      width: 1.2,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: barColor.withValues(alpha: 0.15),
+                        blurRadius: 10,
+                      ),
+                    ],
+                  ),
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      // Active Progress Fill
+                      Container(
+                        width: barWidth,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(30),
+                          gradient: LinearGradient(
+                            colors: [
+                              barColor.withValues(alpha: 0.6),
+                              barColor,
+                              glowColor,
+                            ],
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: barColor.withValues(alpha: 0.45),
+                              blurRadius: 8,
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      // Leading-Edge Energy Spark Orb
+                      if (pct > 0.02)
+                        Positioned(
+                          left: math.max(0, barWidth - 8),
+                          top: -2,
+                          child: Container(
+                            width: 12,
+                            height: 12,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.white,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: barColor,
+                                  blurRadius: 10,
+                                  spreadRadius: 2,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ── HUD Item ─────────────────────────────────────────────────────────────
-  Widget _buildHUDItem(String title, String value, GameTheme theme, {Color? valueColor}) {
+  Widget _buildHUDItem(String title, String value, GameTheme theme, {Color? valueColor, double fontSize = 18.0}) {
     return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          title,
-          style: TextStyle(
-            fontSize: 10,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 1.8,
-            color: theme.textPrimary.withValues(alpha: 0.45),
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            title,
+            style: TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1.1,
+              color: theme.textPrimary.withValues(alpha: 0.5),
+            ),
           ),
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: 3),
         AnimatedSwitcher(
           duration: const Duration(milliseconds: 260),
           transitionBuilder: (child, animation) => ScaleTransition(
@@ -673,13 +1528,16 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             ),
             child: child,
           ),
-          child: Text(
-            value,
-            key: ValueKey<String>(value),
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
-              color: valueColor ?? theme.textPrimary,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              value,
+              key: ValueKey<String>(value),
+              style: TextStyle(
+                fontSize: fontSize,
+                fontWeight: FontWeight.bold,
+                color: valueColor ?? theme.textPrimary,
+              ),
             ),
           ),
         ),
@@ -699,9 +1557,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        margin: const EdgeInsets.only(right: 12),
-        width: isSelected ? 28 : 22,
-        height: isSelected ? 28 : 22,
+        margin: const EdgeInsets.symmetric(horizontal: 3),
+        width: isSelected ? 24 : 18,
+        height: isSelected ? 24 : 18,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           gradient: LinearGradient(
@@ -802,6 +1660,65 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     );
   }
 
+  // ── Praise Text Overlay ──────────────────────────────────────────────────
+  Widget _buildPraiseTextOverlay(GameTheme theme) {
+    if (_activePraiseText == null) return const SizedBox.shrink();
+
+    return AnimatedBuilder(
+      animation: _praiseController,
+      builder: (context, child) {
+        if (_praiseController.isDismissed || _praiseController.value >= 0.98) {
+          return const SizedBox.shrink();
+        }
+
+        final opacity = (1.0 - _praiseOpacityAnimation.value).clamp(0.0, 1.0);
+        final scale = _praiseScaleAnimation.value.clamp(0.0, 1.4);
+        final translateY = -40.0 * _praiseController.value;
+
+        return Positioned.fill(
+          child: IgnorePointer(
+            child: Center(
+              child: Transform.translate(
+                offset: Offset(0, translateY),
+                child: Transform.scale(
+                  scale: scale,
+                  child: Opacity(
+                    opacity: opacity,
+                    child: Text(
+                      _activePraiseText!,
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.orbitron(
+                        fontSize: 26,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 2.0,
+                        color: Colors.white,
+                        shadows: [
+                          Shadow(
+                            color: _activePraiseColor,
+                            blurRadius: 28,
+                          ),
+                          Shadow(
+                            color: _activePraiseColor.withValues(alpha: 0.8),
+                            blurRadius: 16,
+                          ),
+                          const Shadow(
+                            color: Colors.black,
+                            blurRadius: 10,
+                            offset: Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   // ── Pause Overlay ────────────────────────────────────────────────────────
   Widget _buildPauseOverlay(GameTheme theme) {
     return Positioned.fill(
@@ -852,98 +1769,13 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   Widget _buildSplashContent(GameTheme theme) {
     return Column(
       children: [
-        const SizedBox(height: 16),
-        // Animated logo glow
-        _PulsingGlow(
-          color: theme.accentColor,
-          child: Container(
-            width: 70,
-            height: 70,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: RadialGradient(
-                colors: [
-                  theme.accentColor.withValues(alpha: 0.5),
-                  theme.accentColor.withValues(alpha: 0.05),
-                ],
-              ),
-              border: Border.all(color: theme.accentColor.withValues(alpha: 0.4), width: 1.5),
-            ),
-            child: Icon(Icons.bolt_rounded, color: theme.accentColor, size: 34),
-          ),
+        const SizedBox(height: 12),
+        // Orbital Pulsing Hero Logo
+        _OrbitalHeroLogo(
+          accentColor: theme.accentColor,
+          onTap: () => _showLevelRoadmapModal(context, theme),
         ),
-        const SizedBox(height: 20),
-        // Decorative 3x3 preview grid (static)
-        SizedBox(
-          width: double.infinity,
-          child: GridView.count(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisCount: 3,
-            mainAxisSpacing: 12,
-            crossAxisSpacing: 12,
-            children: List.generate(9, (index) {
-              return AnimatedContainer(
-                duration: Duration(milliseconds: 400 + index * 60),
-                decoration: BoxDecoration(
-                  color: theme.tileDefault.withValues(alpha: 0.7),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: theme.panelBorder.withValues(alpha: 0.5)),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.15),
-                      blurRadius: 6,
-                      offset: const Offset(0, 3),
-                    )
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(14),
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                    child: Center(
-                      child: Text(
-                        '${index + 1}',
-                        style: TextStyle(
-                          color: theme.textPrimary.withValues(alpha: 0.2),
-                          fontSize: 16,
-                          fontWeight: FontWeight.w300,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            }),
-          ),
-        ),
-        const SizedBox(height: 20),
-        // How-to-play card
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: theme.tileDefault.withValues(alpha: 0.5),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: theme.panelBorder.withValues(alpha: 0.3)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('HOW TO PLAY',
-                  style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 2,
-                      color: theme.accentColor.withValues(alpha: 0.8))),
-              const SizedBox(height: 8),
-              _buildInstruction('✦', 'Watch the tiles flash in sequence', theme),
-              _buildInstruction('✦', 'Replicate the pattern by tapping', theme),
-              _buildInstruction('✦', 'Each round adds one more step', theme),
-              _buildInstruction('✦', 'No punishment — just keep going!', theme),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 18),
       ],
     );
   }
@@ -977,76 +1809,170 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     final theme = _themes[_selectedThemeIndex];
     final isStart = _gameState == GameState.startScreen;
     final isGameActive = !isStart;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final horizontalPadding = screenWidth < 360 ? 10.0 : 18.0;
+
+    if (_splashStage == 0) {
+      return _CompanySplashScreen(
+        theme: theme,
+        onComplete: () {
+          if (mounted) {
+            setState(() {
+              _splashStage = 1;
+            });
+          }
+        },
+      );
+    }
+
+    if (_splashStage == 1) {
+      return _FullScreenSplashScreen(
+        theme: theme,
+        onLoadingComplete: () {
+          if (mounted) {
+            setState(() {
+              _splashStage = 2;
+            });
+            if (!_isMusicMuted) {
+              AudioService.instance.startAmbientMusic();
+            }
+          }
+        },
+      );
+    }
 
     return Scaffold(
       body: AnimatedGradientBackground(
         colors: theme.bgGradient,
         child: SafeArea(
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 20.0),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 420),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: Column(
+            children: [
+              // ── Full-Width Edge-to-Edge Header Bar ──────────────────────────────
+              Padding(
+                padding: EdgeInsets.only(
+                  left: horizontalPadding,
+                  right: horizontalPadding,
+                  top: 28.0,
+                  bottom: 16.0,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    // ── Header ────────────────────────────────────────────
+                    const SizedBox.shrink(),
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'FOCUS SPARK',
-                              style: TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 4.0,
-                                color: theme.textPrimary,
-                              ),
-                            ),
-                            const SizedBox(height: 3),
-                            Text(
-                              'mindful memory matrix',
-                              style: TextStyle(
-                                fontSize: 11,
-                                letterSpacing: 1.2,
-                                color: theme.textPrimary.withValues(alpha: 0.45),
-                              ),
-                            ),
-                          ],
+                        // 1. Leaderboard / Hall of Fame Icon (Home Screen Only)
+                        if (isStart) ...[
+                          _buildIconToggle(
+                            icon: Icons.emoji_events_outlined,
+                            isActive: false,
+                            onTap: () => _showLeaderboardModal(context, theme),
+                            theme: theme,
+                            tooltip: 'Hall of Fame',
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+
+                        // Return to Home (Active Gameplay Only)
+                        if (isGameActive) ...[
+                          _buildIconToggle(
+                            icon: Icons.home_outlined,
+                            isActive: false,
+                            onTap: _goHome,
+                            theme: theme,
+                            tooltip: 'Return to Home',
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+
+                        // 2a. Ambient Music Toggle Button
+                        _buildIconToggle(
+                          icon: _isMusicMuted
+                              ? Icons.music_off_rounded
+                              : Icons.music_note_rounded,
+                          isActive: !_isMusicMuted,
+                          onTap: _toggleMusic,
+                          theme: theme,
+                          tooltip: _isMusicMuted ? 'Enable Music' : 'Mute Music',
                         ),
+                        const SizedBox(width: 4),
+
+                        // 2b. Sound Effects (SFX) Toggle Button
+                        _buildIconToggle(
+                          icon: _isSfxMuted
+                              ? Icons.volume_off_outlined
+                              : Icons.volume_up_outlined,
+                          isActive: !_isSfxMuted,
+                          onTap: _toggleSfx,
+                          theme: theme,
+                          tooltip: _isSfxMuted ? 'Enable SFX' : 'Mute SFX',
+                        ),
+                        const SizedBox(width: 4),
+
+                        // 2c. Haptic Feedback Toggle Button
+                        _buildIconToggle(
+                          icon: _isHapticsMuted
+                              ? Icons.vibration_outlined
+                              : Icons.vibration_rounded,
+                          isActive: !_isHapticsMuted,
+                          onTap: _toggleHaptics,
+                          theme: theme,
+                          tooltip: _isHapticsMuted ? 'Enable Haptics' : 'Mute Haptics',
+                        ),
+                        const SizedBox(width: 4),
+
+                        // 3. How to Play Icon (Home Screen Only)
+                        if (isStart) ...[
+                          _buildIconToggle(
+                            icon: Icons.help_outline_rounded,
+                            isActive: false,
+                            onTap: () => _showInstructionsModal(context, theme),
+                            theme: theme,
+                            tooltip: 'How to Play',
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+
+                        // 4. Zen Mode Button
+                        _buildIconToggle(
+                          icon: _isZenMode ? Icons.spa : Icons.spa_outlined,
+                          isActive: _isZenMode,
+                          onTap: _toggleZenMode,
+                          theme: theme,
+                          tooltip: _isZenMode
+                              ? 'Disable Zen Mode'
+                              : 'Enable Zen Mode',
+                        ),
+                        const SizedBox(width: 4),
+
+                        // 5. Theme Dots (Cosmic Indigo, Sage Calm, Midnight Cyber)
                         Row(
-                          children: [
-                            _buildIconToggle(
-                              icon: _isMuted
-                                  ? Icons.volume_off_outlined
-                                  : Icons.volume_up_outlined,
-                              isActive: !_isMuted,
-                              onTap: _toggleMute,
-                              theme: theme,
-                              tooltip: _isMuted ? 'Unmute' : 'Mute',
-                            ),
-                            const SizedBox(width: 4),
-                            _buildIconToggle(
-                              icon: _isZenMode ? Icons.spa : Icons.spa_outlined,
-                              isActive: _isZenMode,
-                              onTap: _toggleZenMode,
-                              theme: theme,
-                              tooltip: _isZenMode
-                                  ? 'Disable Zen Mode'
-                                  : 'Enable Zen Mode',
-                            ),
-                          ],
+                          mainAxisSize: MainAxisSize.min,
+                          children: List.generate(
+                            _themes.length,
+                            (i) => _buildThemeDot(i, theme),
+                          ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 20),
+                  ],
+                ),
+              ),
 
-                    // ── Session Summary (appears on splash after a session) ─
-                    if (isStart) _buildSessionSummary(theme),
+              // ── Centered Main Content Area ─────────────────────────────────────
+              Expanded(
+                child: Center(
+                  child: SingleChildScrollView(
+                    padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 8.0),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 420),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          // ── Session Summary (appears on splash after a session) ─
+                          if (isStart) _buildSessionSummary(theme),
 
                     // ── Glassmorphic Main Panel ───────────────────────────
                     Container(
@@ -1106,41 +2032,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                               ),
 
                               // ── Input Timer Bar ──────────────────────────
-                              AnimatedOpacity(
-                                opacity: _gameState == GameState.playerInput ? 1.0 : 0.0,
-                                duration: const Duration(milliseconds: 250),
-                                child: Padding(
-                                  padding: const EdgeInsets.only(bottom: 14.0),
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: [
-                                      ClipRRect(
-                                        borderRadius: BorderRadius.circular(4),
-                                        child: Container(
-                                          height: 5,
-                                          color: theme.tileDefault,
-                                          child: FractionallySizedBox(
-                                            alignment: Alignment.centerLeft,
-                                            widthFactor: _inputTimerPercentage,
-                                            child: Container(
-                                              decoration: BoxDecoration(
-                                                gradient: LinearGradient(
-                                                  colors: [
-                                                    _inputTimerPercentage > 0.3
-                                                        ? theme.accentColor
-                                                        : const Color(0xFFEF4444),
-                                                    theme.tileActiveGlow,
-                                                  ],
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
+                              _buildInputTimerBar(theme),
 
                               // ── Grid (or splash content) ─────────────────
                               if (isStart)
@@ -1182,10 +2074,14 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                         ),
                                       ),
                                     ),
-                                    // Pause overlay
-                                    _buildPauseOverlay(theme),
-                                  ],
-                                ),
+                                      // Praise Text Overlay
+                                      _buildPraiseTextOverlay(theme),
+                                      // Pause overlay
+                                     _buildPauseOverlay(theme),
+                                     // Direct Rewarded Ad overlay
+                                     _buildDirectAdOverlay(theme),
+                                   ],
+                                 ),
 
                               if (isGameActive) ...[
                                 const SizedBox(height: 14),
@@ -1210,40 +2106,86 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                         ),
                       ),
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 56),
 
                     // ── Controls Row ────────────────────────────────────────
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    Wrap(
+                      alignment: WrapAlignment.center,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 12,
+                      runSpacing: 10,
                       children: [
-                        // Theme Dots
-                        Row(
-                          children: List.generate(
-                            _themes.length,
-                            (i) => _buildThemeDot(i, theme),
-                          ),
-                        ),
                         // Action Buttons
-                        Row(
+                        Wrap(
+                          alignment: WrapAlignment.end,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: 6,
+                          runSpacing: 6,
                           children: [
                             if (isGameActive) ...[
+                              ElevatedButton.icon(
+                                onPressed: (_gameState != GameState.playerInput || _isAdActive)
+                                    ? null
+                                    : _onHintPressed,
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: _freeHintsRemainingInLevel > 0
+                                      ? theme.accentColor.withValues(alpha: 0.22)
+                                      : const Color(0xFFF59E0B).withValues(alpha: 0.22),
+                                  foregroundColor: theme.textPrimary,
+                                  disabledBackgroundColor:
+                                      theme.tileDefault.withValues(alpha: 0.4),
+                                  disabledForegroundColor:
+                                      theme.textPrimary.withValues(alpha: 0.3),
+                                  side: BorderSide(
+                                    color: _freeHintsRemainingInLevel > 0
+                                        ? theme.accentColor.withValues(alpha: 0.45)
+                                        : const Color(0xFFF59E0B).withValues(alpha: 0.6),
+                                  ),
+                                  elevation: 0,
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 8),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12)),
+                                ),
+                                icon: Icon(
+                                  _freeHintsRemainingInLevel > 0
+                                      ? Icons.lightbulb_outline_rounded
+                                      : Icons.ondemand_video_rounded,
+                                  size: 16,
+                                  color: _freeHintsRemainingInLevel > 0
+                                      ? theme.accentColor
+                                      : const Color(0xFFF59E0B),
+                                ),
+                                label: Text(
+                                  _freeHintsRemainingInLevel > 0 ? 'HINT (FREE)' : 'HINT (+AD)',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 11,
+                                    letterSpacing: 0.8,
+                                    color: _freeHintsRemainingInLevel > 0
+                                        ? theme.accentColor
+                                        : const Color(0xFFF59E0B),
+                                  ),
+                                ),
+                              ),
                               TextButton(
-                                onPressed: _resetSession,
+                                onPressed: _startSession,
                                 style: TextButton.styleFrom(
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 12, vertical: 8),
+                                      horizontal: 10, vertical: 8),
+                                  minimumSize: Size.zero,
+                                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                                 ),
                                 child: Text(
-                                  'RESET',
+                                  'RESTART',
                                   style: TextStyle(
                                     color: theme.textPrimary.withValues(alpha: 0.55),
                                     fontWeight: FontWeight.w600,
                                     fontSize: 12,
-                                    letterSpacing: 1.4,
+                                    letterSpacing: 1.2,
                                   ),
                                 ),
                               ),
-                              const SizedBox(width: 6),
                               ElevatedButton.icon(
                                 onPressed: (_gameState == GameState.successTransition ||
                                         _gameState == GameState.errorTransition)
@@ -1280,27 +2222,70 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                 ),
                               ),
                             ] else ...[
-                              ElevatedButton(
-                                onPressed: _startSession,
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: theme.accentColor,
-                                  foregroundColor: Colors.black87,
-                                  elevation: 6,
-                                  shadowColor: theme.accentColor.withValues(alpha: 0.45),
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 28, vertical: 14),
-                                  shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(16)),
-                                ),
-                                child: const Text(
-                                  'START SESSION',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14,
-                                    letterSpacing: 1.4,
+                              if (_hasSavedSession) ...[
+                                TextButton(
+                                  onPressed: _startSession,
+                                  style: TextButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 8),
+                                    minimumSize: Size.zero,
+                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  child: Text(
+                                    'NEW SESSION',
+                                    style: TextStyle(
+                                      color: theme.textPrimary.withValues(alpha: 0.55),
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 11,
+                                      letterSpacing: 1.1,
+                                    ),
                                   ),
                                 ),
-                              ),
+                                ElevatedButton.icon(
+                                  onPressed: _continueSession,
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: theme.accentColor,
+                                    foregroundColor: Colors.black87,
+                                    elevation: 6,
+                                    shadowColor: theme.accentColor.withValues(alpha: 0.45),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 16, vertical: 12),
+                                    shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(16)),
+                                  ),
+                                  icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                                  label: Text(
+                                    'CONTINUE (LVL $_level)',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                      letterSpacing: 1.1,
+                                    ),
+                                  ),
+                                ),
+                              ] else ...[
+                                ElevatedButton(
+                                  onPressed: _startSession,
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: theme.accentColor,
+                                    foregroundColor: Colors.black87,
+                                    elevation: 6,
+                                    shadowColor: theme.accentColor.withValues(alpha: 0.45),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 24, vertical: 14),
+                                    shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(16)),
+                                  ),
+                                  child: const Text(
+                                    'NEW SESSION',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13,
+                                      letterSpacing: 1.3,
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ],
                           ],
                         ),
@@ -1313,8 +2298,1156 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             ),
           ),
         ),
+        _buildBannerAdSpace(theme),
+      ],
+    ),
+        ),
       ),
     );
+  }
+
+  Widget _buildBannerAdSpace(GameTheme theme) {
+    return Container(
+      width: double.infinity,
+      height: 52.0,
+      decoration: BoxDecoration(
+        color: theme.panelBg.withValues(alpha: 0.45),
+        border: Border(
+          top: BorderSide(
+            color: theme.panelBorder.withValues(alpha: 0.35),
+            width: 1.0,
+          ),
+        ),
+      ),
+      child: Center(
+        child: _isBannerAdLoaded && _bannerAd != null
+            ? SizedBox(
+                width: _bannerAd!.size.width.toDouble(),
+                height: _bannerAd!.size.height.toDouble(),
+                child: AdWidget(ad: _bannerAd!),
+              )
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.subtitles_outlined,
+                    size: 15,
+                    color: theme.textPrimary.withValues(alpha: 0.35),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'BANNER AD SPACE',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 1.6,
+                      color: theme.textPrimary.withValues(alpha: 0.35),
+                    ),
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  // ── Level Progression Helper ─────────────────────────────────────────────
+  void _advanceToNextLevelPlayback(int completedLevel) async {
+    if (!mounted || _gameState != GameState.successTransition) return;
+
+    void startNextLevelSequence() {
+      if (!mounted) return;
+      setState(() {
+        _gameState = GameState.playback;
+        _sequence.add(_random.nextInt(9));
+      });
+      _saveGameProgress();
+      _runPlayback();
+    }
+
+    if (AdService.shouldShowInterstitialOnLevelComplete(completedLevel)) {
+      if (kIsWeb) {
+        _showTestInterstitialOverlay(onDismissed: startNextLevelSequence);
+      } else {
+        final shown = await AdService.instance.showInterstitialAdOrLoad(onDismissed: startNextLevelSequence);
+        if (!shown) {
+          startNextLevelSequence();
+        }
+      }
+    } else {
+      startNextLevelSequence();
+    }
+  }
+
+  // ── Level Completed Victory Modal ───────────────────────────────────────
+  void _showLevelCompletedModal(BuildContext context, GameTheme theme, int completedLevel) {
+    HapticFeedback.mediumImpact();
+    Future.delayed(const Duration(milliseconds: 80), () => HapticFeedback.mediumImpact());
+
+    String? milestoneRank;
+    if (completedLevel == 5) {
+      milestoneRank = 'SPARK INITIATE';
+    } else if (completedLevel == 10) {
+      milestoneRank = 'MATRIX ADEPT';
+    } else if (completedLevel == 15) {
+      milestoneRank = 'FOCUS SCHOLAR';
+    } else if (completedLevel == 20) {
+      milestoneRank = 'SPARK MASTER';
+    } else if (completedLevel == 25) {
+      milestoneRank = 'MATRIX GRANDMASTER';
+    } else if (completedLevel == 30) {
+      milestoneRank = 'MINDFUL LEGEND';
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withValues(alpha: 0.8),
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 400),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+            decoration: BoxDecoration(
+              color: theme.panelBg,
+              borderRadius: BorderRadius.circular(28),
+              border: Border.all(color: theme.accentColor.withValues(alpha: 0.6), width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: theme.accentColor.withValues(alpha: 0.25),
+                  blurRadius: 30,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Glowing Trophy Icon Badge
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: theme.accentColor.withValues(alpha: 0.15),
+                    border: Border.all(color: theme.accentColor, width: 2.0),
+                    boxShadow: [
+                      BoxShadow(
+                        color: theme.accentColor.withValues(alpha: 0.35),
+                        blurRadius: 18,
+                      ),
+                    ],
+                  ),
+                  child: Icon(
+                    Icons.emoji_events_rounded,
+                    size: 42,
+                    color: theme.accentColor,
+                  ),
+                ),
+                const SizedBox(height: 18),
+
+                // Victory Header
+                ShaderMask(
+                  shaderCallback: (bounds) => LinearGradient(
+                    colors: [
+                      Colors.white,
+                      theme.accentColor,
+                      theme.tileActiveGlow,
+                    ],
+                  ).createShader(bounds),
+                  child: Text(
+                    'LEVEL $completedLevel COMPLETED!',
+                    style: GoogleFonts.orbitron(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.6,
+                      color: Colors.white,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+                const SizedBox(height: 10),
+
+                // 3-Star Performance Rating System
+                Builder(
+                  builder: (context) {
+                    final int starsEarned = _inputTimerPercentage >= 0.65 ? 3 : (_inputTimerPercentage >= 0.30 ? 2 : 1);
+                    final String starRatingText = starsEarned == 3
+                        ? 'PERFECT SPARK! ⚡'
+                        : (starsEarned == 2 ? 'GREAT FOCUS! 🎯' : 'LEVEL CLEARED! 🏁');
+                    final Color starColor = starsEarned == 3
+                        ? const Color(0xFFF59E0B)
+                        : (starsEarned == 2 ? const Color(0xFF10B981) : const Color(0xFF06B6D4));
+
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: List.generate(3, (index) {
+                            final isEarned = index < starsEarned;
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                              child: Icon(
+                                isEarned ? Icons.star_rounded : Icons.star_border_rounded,
+                                size: index == 1 ? 34 : 26,
+                                color: isEarned ? starColor : Colors.white24,
+                              ),
+                            );
+                          }),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          starRatingText,
+                          style: GoogleFonts.orbitron(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 1.2,
+                            color: starColor,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                if (milestoneRank != null) ...[
+                  const SizedBox(height: 14),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: theme.accentColor.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: theme.accentColor.withValues(alpha: 0.5)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.stars_rounded, size: 14, color: Colors.amber),
+                        const SizedBox(width: 6),
+                        Text(
+                          'RANK UNLOCKED: $milestoneRank',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1.2,
+                            color: theme.textPrimary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+
+                const SizedBox(height: 22),
+
+                // Performance Summary HUD Grid
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.3),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: theme.panelBorder.withValues(alpha: 0.4)),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _buildHUDItem('NEXT LEVEL', 'LVL $_level', theme,
+                            valueColor: theme.accentColor, fontSize: 14.0),
+                      ),
+                      Container(
+                        height: 24,
+                        width: 1,
+                        color: theme.panelBorder.withValues(alpha: 0.3),
+                      ),
+                      Expanded(
+                        child: _buildHUDItem('STREAK', '$_currentStreak 🔥', theme,
+                            fontSize: 14.0),
+                      ),
+                      Container(
+                        height: 24,
+                        width: 1,
+                        color: theme.panelBorder.withValues(alpha: 0.3),
+                      ),
+                      Expanded(
+                        child: _buildHUDItem(
+                            'BEST SCORE',
+                            'LVL ${math.max(_level, _highScore)}',
+                            theme,
+                            fontSize: 14.0),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 26),
+
+                // Primary Action Button: CONTINUE TO NEXT LEVEL
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      _advanceToNextLevelPlayback(completedLevel);
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: theme.accentColor,
+                      foregroundColor: Colors.black87,
+                      elevation: 8,
+                      shadowColor: theme.accentColor.withValues(alpha: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                    icon: const Icon(Icons.play_arrow_rounded, size: 22),
+                    label: Text(
+                      'CONTINUE TO LEVEL $_level',
+                      style: GoogleFonts.orbitron(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 10),
+
+                // Secondary Action Button: VIEW ROADMAP
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      _showLevelRoadmapModal(
+                        context,
+                        theme,
+                        onDismiss: () {
+                          _advanceToNextLevelPlayback(completedLevel);
+                        },
+                      );
+                    },
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: theme.textPrimary,
+                      side: BorderSide(color: theme.panelBorder),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                    icon: Icon(Icons.map_outlined, size: 16, color: theme.textPrimary.withValues(alpha: 0.7)),
+                    label: Text(
+                      'VIEW ROADMAP',
+                      style: GoogleFonts.spaceGrotesk(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.2,
+                        color: theme.textPrimary.withValues(alpha: 0.85),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ── Instructions Modal ────────────────────────────────────────────────
+  void _showInstructionsModal(BuildContext context, GameTheme theme) {
+    HapticFeedback.selectionClick();
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withValues(alpha: 0.75),
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 420),
+            decoration: BoxDecoration(
+              color: theme.panelBg,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: theme.panelBorder, width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  blurRadius: 32,
+                  offset: const Offset(0, 12),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+                child: Padding(
+                  padding: const EdgeInsets.all(22.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.help_outline_rounded,
+                                  color: theme.accentColor, size: 24),
+                              const SizedBox(width: 8),
+                              Text(
+                                'HOW TO PLAY',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 2.0,
+                                  color: theme.textPrimary,
+                                ),
+                              ),
+                            ],
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            icon: Icon(Icons.close_rounded,
+                                color: theme.textPrimary.withValues(alpha: 0.6)),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      const Divider(height: 1, color: Colors.white12),
+                      const SizedBox(height: 16),
+                      _buildInstruction('✦', 'Watch the tiles flash in sequence', theme),
+                      _buildInstruction('✦', 'Replicate the pattern by tapping', theme),
+                      _buildInstruction('✦', 'Each round adds one more step', theme),
+                      _buildInstruction('✦', '1 Free Hint per level + Direct Rewarded Ad', theme),
+                      _buildInstruction('✦', 'No punishment — just keep going & stay focused!', theme),
+                      const SizedBox(height: 20),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: theme.accentColor,
+                            foregroundColor: Colors.black87,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                          ),
+                          child: const Text(
+                            'GOT IT!',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 1.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ── Level Roadmap Modal ────────────────────────────────────────────────
+  void _showLevelRoadmapModal(BuildContext context, GameTheme theme, {VoidCallback? onDismiss}) {
+    HapticFeedback.selectionClick();
+    final effectiveBest = math.max(_level, _highScore);
+    final maxTargetLevel = math.max(effectiveBest + 8, 25);
+    final ScrollController scrollController = ScrollController();
+
+    // Auto-scroll to center current level after frame render
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (scrollController.hasClients) {
+        final targetOffset = (_level - 1) * 70.0;
+        scrollController.animateTo(
+          targetOffset.clamp(0.0, scrollController.position.maxScrollExtent),
+          duration: const Duration(milliseconds: 600),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    });
+
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withValues(alpha: 0.75),
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 420, maxHeight: 600),
+            decoration: BoxDecoration(
+              color: theme.panelBg,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: theme.panelBorder, width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  blurRadius: 32,
+                  offset: const Offset(0, 12),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+                child: Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Header
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.map_rounded,
+                                  color: theme.accentColor, size: 24),
+                              const SizedBox(width: 8),
+                              Text(
+                                'LEVEL ROADMAP',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 2.0,
+                                  color: theme.textPrimary,
+                                ),
+                              ),
+                            ],
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            icon: Icon(Icons.close_rounded,
+                                color: theme.textPrimary.withValues(alpha: 0.6)),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      // Subheader Telemetry
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: theme.accentColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: theme.accentColor.withValues(alpha: 0.3)),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          children: [
+                            Text(
+                              'CURRENT: LVL $_level',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: theme.accentColor,
+                              ),
+                            ),
+                            Text('•', style: TextStyle(color: theme.textPrimary.withValues(alpha: 0.3))),
+                            Text(
+                              'BEST: LVL $effectiveBest',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: theme.textPrimary.withValues(alpha: 0.8),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      const Divider(height: 1, color: Colors.white12),
+                      const SizedBox(height: 14),
+
+                      // Winding Level Path
+                      Expanded(
+                        child: ListView.builder(
+                          controller: scrollController,
+                          itemCount: maxTargetLevel,
+                          itemBuilder: (context, index) {
+                            final lvl = index + 1;
+                            final isCurrent = lvl == _level;
+                            final isBestPeak = lvl == _highScore && _highScore > 0;
+                            final isPassed = (lvl < _level) || (lvl <= _highScore && !isCurrent && !isBestPeak);
+
+                            // Winding S-curve normalized alignment ratio (-0.50 to +0.50)
+                            final double alignX = math.sin(lvl * 0.65) * 0.50;
+                            final double nextAlignX = math.sin((lvl + 1) * 0.65) * 0.50;
+
+                            // Milestone titles at level 5, 10, 15, 20, 25, 30
+                            String? milestoneTitle;
+                            if (lvl == 5) milestoneTitle = '🌟 Spark Initiate';
+                            if (lvl == 10) milestoneTitle = '⚡ Focus Adept';
+                            if (lvl == 15) milestoneTitle = '🧘 Mindful Master';
+                            if (lvl == 20) milestoneTitle = '🔮 Zen Transcendent';
+                            if (lvl == 25) milestoneTitle = '🌌 Cosmic Sage';
+                            if (lvl == 30) milestoneTitle = '👑 Memory Legend';
+
+                            Widget nodeWidget = AnimatedContainer(
+                              duration: const Duration(milliseconds: 300),
+                              width: isCurrent ? 50 : 42,
+                              height: isCurrent ? 50 : 42,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: isCurrent
+                                    ? theme.accentColor
+                                    : isPassed || isBestPeak
+                                        ? theme.accentColor.withValues(alpha: 0.25)
+                                        : theme.tileDefault.withValues(alpha: 0.35),
+                                border: Border.all(
+                                  color: isCurrent
+                                      ? Colors.white
+                                      : isPassed || isBestPeak
+                                          ? theme.accentColor.withValues(alpha: 0.75)
+                                          : theme.panelBorder.withValues(alpha: 0.4),
+                                  width: isCurrent ? 2.5 : 1.5,
+                                ),
+                                boxShadow: isCurrent
+                                    ? [
+                                        BoxShadow(
+                                          color: theme.accentColor.withValues(alpha: 0.65),
+                                          blurRadius: 18,
+                                          spreadRadius: 3,
+                                        ),
+                                      ]
+                                    : isPassed || isBestPeak
+                                        ? [
+                                            BoxShadow(
+                                              color: theme.accentColor.withValues(alpha: 0.25),
+                                              blurRadius: 8,
+                                            ),
+                                          ]
+                                        : null,
+                              ),
+                              child: Center(
+                                child: isCurrent
+                                    ? const Icon(
+                                        Icons.local_fire_department_rounded,
+                                        color: Colors.black87,
+                                        size: 24,
+                                      )
+                                    : isPassed || isBestPeak
+                                        ? Icon(
+                                            Icons.check_rounded,
+                                            color: theme.accentColor,
+                                            size: 18,
+                                          )
+                                        : Text(
+                                            '$lvl',
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold,
+                                              color: theme.textPrimary
+                                                  .withValues(alpha: 0.45),
+                                            ),
+                                          ),
+                              ),
+                            );
+
+                            if (isBestPeak && !isCurrent) {
+                              nodeWidget = _PulsingBestPeakNode(child: nodeWidget);
+                            }
+
+                            return Column(
+                              children: [
+                                if (milestoneTitle != null) ...[
+                                  Container(
+                                    margin: const EdgeInsets.symmetric(vertical: 8),
+                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                                    decoration: BoxDecoration(
+                                      color: isPassed || isCurrent || isBestPeak
+                                          ? const Color(0xFFFFD700).withValues(alpha: 0.15)
+                                          : theme.tileDefault.withValues(alpha: 0.2),
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(
+                                        color: isPassed || isCurrent || isBestPeak
+                                            ? const Color(0xFFFFD700).withValues(alpha: 0.5)
+                                            : theme.panelBorder.withValues(alpha: 0.3),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      milestoneTitle,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        letterSpacing: 1.2,
+                                        color: isPassed || isCurrent || isBestPeak
+                                            ? const Color(0xFFFFD700)
+                                            : theme.textPrimary.withValues(alpha: 0.4),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                                SizedBox(
+                                  height: 70,
+                                  child: Stack(
+                                    children: [
+                                      // Seamless Bezier Curved Connecting Line
+                                      if (lvl < maxTargetLevel)
+                                        Positioned.fill(
+                                          child: CustomPaint(
+                                            painter: _RoadmapSegmentPainter(
+                                              startAlignX: alignX,
+                                              endAlignX: nextAlignX,
+                                              lineColor: isPassed || isCurrent || (lvl < _highScore)
+                                                  ? theme.accentColor.withValues(alpha: 0.65)
+                                                  : theme.panelBorder.withValues(alpha: 0.3),
+                                            ),
+                                          ),
+                                        ),
+                                      // Level Node
+                                      Align(
+                                        alignment: Alignment(alignX, 0.0),
+                                        child: nodeWidget,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                      if (_gameState == GameState.successTransition) ...[
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: theme.accentColor,
+                              foregroundColor: Colors.black87,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                            ),
+                            icon: const Icon(Icons.play_arrow_rounded, size: 20),
+                            label: Text(
+                              'CONTINUE TO LEVEL $_level',
+                              style: GoogleFonts.orbitron(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    ).then((_) {
+      scrollController.dispose();
+      onDismiss?.call();
+    });
+  }
+
+  // ── Edit Player Name Modal ─────────────────────────────────────────────
+  void _showEditPlayerNameModal(BuildContext context, GameTheme theme) {
+    HapticFeedback.selectionClick();
+    final TextEditingController nameController = TextEditingController(text: _playerName);
+
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.8),
+      builder: (dialogCtx) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 360),
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: theme.panelBg,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: theme.accentColor.withValues(alpha: 0.5), width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: theme.accentColor.withValues(alpha: 0.25),
+                  blurRadius: 28,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.edit_rounded, color: theme.accentColor, size: 20),
+                    const SizedBox(width: 8),
+                    Text(
+                      'EDIT GAMER TAG',
+                      style: GoogleFonts.orbitron(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.4,
+                        color: theme.textPrimary,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: nameController,
+                  maxLength: 14,
+                  autofocus: true,
+                  style: TextStyle(
+                    color: theme.textPrimary,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                  decoration: InputDecoration(
+                    labelText: 'Player Name',
+                    labelStyle: TextStyle(color: theme.accentColor),
+                    counterStyle: TextStyle(color: theme.textPrimary.withValues(alpha: 0.5)),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide(color: theme.panelBorder),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide(color: theme.accentColor, width: 1.5),
+                    ),
+                    filled: true,
+                    fillColor: theme.tileDefault.withValues(alpha: 0.3),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.of(dialogCtx).pop(),
+                      child: Text(
+                        'CANCEL',
+                        style: TextStyle(
+                          color: theme.textPrimary.withValues(alpha: 0.6),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton(
+                      onPressed: () async {
+                        final newName = nameController.text.trim();
+                        if (newName.isNotEmpty) {
+                          final oldName = _playerName;
+                          setState(() {
+                            _playerName = newName;
+                            for (int i = 0; i < _leaderboard.length; i++) {
+                              if (_leaderboard[i].playerName == oldName || _leaderboard[i].playerName == 'You') {
+                                _leaderboard[i] = LeaderboardEntry(
+                                  playerName: newName,
+                                  level: _leaderboard[i].level,
+                                  streak: _leaderboard[i].streak,
+                                  date: _leaderboard[i].date,
+                                );
+                              }
+                            }
+                          });
+                          await _prefs.setString('focus_spark_player_name', newName);
+                          final String jsonStr = jsonEncode(_leaderboard.map((e) => e.toJson()).toList());
+                          await _prefs.setString('focus_spark_hall_of_fame', jsonStr);
+                        }
+                        if (dialogCtx.mounted) {
+                          Navigator.of(dialogCtx).pop();
+                          _showLeaderboardModal(context, theme);
+                        }
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: theme.accentColor,
+                        foregroundColor: Colors.black87,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: const Text(
+                        'SAVE',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    ).then((_) {
+      nameController.dispose();
+    });
+  }
+
+  // ── Leaderboard Modal ──────────────────────────────────────────────────
+  void _showLeaderboardModal(BuildContext context, GameTheme theme) {
+    HapticFeedback.selectionClick();
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withValues(alpha: 0.75),
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 420, maxHeight: 560),
+            decoration: BoxDecoration(
+              color: theme.panelBg,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: theme.panelBorder, width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  blurRadius: 32,
+                  offset: const Offset(0, 12),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+                child: Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Modal Header
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(Icons.emoji_events_rounded,
+                                  color: Color(0xFFFFD700), size: 24),
+                              const SizedBox(width: 8),
+                              Text(
+                                'HALL OF FAME',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 2.0,
+                                  color: theme.textPrimary,
+                                ),
+                              ),
+                            ],
+                          ),
+                          Row(
+                            children: [
+                              InkWell(
+                                onTap: () {
+                                  Navigator.of(context).pop();
+                                  _showEditPlayerNameModal(context, theme);
+                                },
+                                borderRadius: BorderRadius.circular(10),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: theme.accentColor.withValues(alpha: 0.15),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: theme.accentColor.withValues(alpha: 0.4)),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.edit_rounded, size: 12, color: theme.accentColor),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        _playerName,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                          color: theme.accentColor,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              IconButton(
+                                onPressed: () => Navigator.of(context).pop(),
+                                icon: Icon(Icons.close_rounded,
+                                    color: theme.textPrimary.withValues(alpha: 0.6)),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      const Divider(height: 1, color: Colors.white12),
+                      const SizedBox(height: 12),
+
+                      // Leaderboard Content List
+                      Expanded(
+                        child: _leaderboard.isEmpty
+                            ? Center(
+                                child: Text(
+                                  'No scores recorded yet.\nPlay a session to enter the Hall of Fame!',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: theme.textPrimary.withValues(alpha: 0.5),
+                                  ),
+                                ),
+                              )
+                            : ListView.separated(
+                                itemCount: _leaderboard.length,
+                                separatorBuilder: (_, __) =>
+                                    const SizedBox(height: 8),
+                                itemBuilder: (context, index) {
+                                  final entry = _leaderboard[index];
+                                  final rank = index + 1;
+                                  final isTop3 = rank <= 3;
+                                  final isCurrentUser = entry.playerName == _playerName || entry.playerName == 'You';
+
+                                  Color badgeColor = theme.accentColor;
+                                  if (rank == 1) badgeColor = const Color(0xFFFFD700);
+                                  if (rank == 2) badgeColor = const Color(0xFFC0C0C0);
+                                  if (rank == 3) badgeColor = const Color(0xFFCD7F32);
+
+                                  return Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 14, vertical: 10),
+                                    decoration: BoxDecoration(
+                                      color: isCurrentUser
+                                          ? theme.accentColor.withValues(alpha: 0.22)
+                                          : (isTop3
+                                              ? badgeColor.withValues(alpha: 0.12)
+                                              : theme.tileDefault.withValues(alpha: 0.3)),
+                                      borderRadius: BorderRadius.circular(14),
+                                      border: Border.all(
+                                        color: isCurrentUser
+                                            ? theme.accentColor
+                                            : (isTop3
+                                                ? badgeColor.withValues(alpha: 0.4)
+                                                : theme.panelBorder.withValues(alpha: 0.3)),
+                                        width: isCurrentUser ? 2.0 : 1.0,
+                                      ),
+                                      boxShadow: isCurrentUser
+                                          ? [
+                                              BoxShadow(
+                                                color: theme.accentColor.withValues(alpha: 0.35),
+                                                blurRadius: 14,
+                                                spreadRadius: 1,
+                                              ),
+                                            ]
+                                          : null,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        // Rank Badge
+                                        Container(
+                                          width: 30,
+                                          height: 30,
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: badgeColor.withValues(alpha: 0.22),
+                                            border: Border.all(
+                                                color: badgeColor.withValues(alpha: 0.6),
+                                                width: 1),
+                                          ),
+                                          child: Center(
+                                            child: Text(
+                                              rank == 1
+                                                  ? '🥇'
+                                                  : rank == 2
+                                                      ? '🥈'
+                                                      : rank == 3
+                                                          ? '🥉'
+                                                          : '#$rank',
+                                              style: TextStyle(
+                                                fontSize: isTop3 ? 14 : 11,
+                                                fontWeight: FontWeight.bold,
+                                                color: isTop3
+                                                    ? badgeColor
+                                                    : theme.textPrimary
+                                                        .withValues(alpha: 0.7),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        // Name & Details
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                entry.playerName,
+                                                style: TextStyle(
+                                                  fontSize: 13,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: theme.textPrimary,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                'Streak: ${entry.streak} • ${_formatDate(entry.date)}',
+                                                style: TextStyle(
+                                                  fontSize: 10,
+                                                  color: theme.textPrimary
+                                                      .withValues(alpha: 0.45),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        // Level Tag
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 10, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: badgeColor.withValues(alpha: 0.18),
+                                            borderRadius: BorderRadius.circular(10),
+                                            border: Border.all(
+                                                color: badgeColor.withValues(alpha: 0.35)),
+                                          ),
+                                          child: Text(
+                                            'LVL ${entry.level}',
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold,
+                                              color: badgeColor,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  String _formatDate(DateTime date) {
+    return '${date.day}/${date.month}/${date.year}';
   }
 
   Widget _buildIconToggle({
@@ -1354,6 +3487,370 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           ),
         ),
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hint tile pulse animation widget
+// ---------------------------------------------------------------------------
+class _HintTilePulse extends StatefulWidget {
+  final Widget child;
+  final bool isHinted;
+  final Color pulseColor;
+
+  const _HintTilePulse({
+    required this.child,
+    required this.isHinted,
+    required this.pulseColor,
+  });
+
+  @override
+  State<_HintTilePulse> createState() => _HintTilePulseState();
+}
+
+class _HintTilePulseState extends State<_HintTilePulse>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _scaleAnim;
+  late Animation<double> _glowAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      duration: const Duration(milliseconds: 550),
+      vsync: this,
+    );
+    _scaleAnim = Tween<double>(begin: 1.0, end: 1.15).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+    _glowAnim = Tween<double>(begin: 0.1, end: 1.0).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+
+    if (widget.isHinted) {
+      _ctrl.repeat(reverse: true);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _HintTilePulse oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isHinted && !oldWidget.isHinted) {
+      _ctrl.repeat(reverse: true);
+    } else if (!widget.isHinted && oldWidget.isHinted) {
+      _ctrl.stop();
+      _ctrl.reset();
+    }
+  }
+
+  void _startPulse() {
+    _ctrl.forward(from: 0.0).then((_) {
+      if (mounted) {
+        _ctrl.reverse();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.isHinted && _ctrl.isDismissed) {
+      return widget.child;
+    }
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, child) {
+        return Transform.scale(
+          scale: widget.isHinted ? _scaleAnim.value : 1.0,
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: widget.isHinted
+                  ? [
+                      BoxShadow(
+                        color: widget.pulseColor.withValues(alpha: 0.85 * _glowAnim.value),
+                        blurRadius: 26 * _glowAnim.value,
+                        spreadRadius: 4 * _glowAnim.value,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: child,
+          ),
+        );
+      },
+      child: widget.child,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Smooth breathing scale node widget for Personal Best Peak level
+// ---------------------------------------------------------------------------
+class _PulsingBestPeakNode extends StatefulWidget {
+  final Widget child;
+  const _PulsingBestPeakNode({required this.child});
+
+  @override
+  State<_PulsingBestPeakNode> createState() => _PulsingBestPeakNodeState();
+}
+
+class _PulsingBestPeakNodeState extends State<_PulsingBestPeakNode>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _scaleAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      duration: const Duration(milliseconds: 1600),
+      vsync: this,
+    )..repeat(reverse: true);
+    _scaleAnim = Tween<double>(begin: 0.92, end: 1.08).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, child) {
+        return Transform.scale(
+          scale: _scaleAnim.value,
+          child: child,
+        );
+      },
+      child: widget.child,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Curved Connecting Line Painter for Level Roadmap
+// ---------------------------------------------------------------------------
+class _RoadmapSegmentPainter extends CustomPainter {
+  final double startAlignX;
+  final double endAlignX;
+  final Color lineColor;
+
+  _RoadmapSegmentPainter({
+    required this.startAlignX,
+    required this.endAlignX,
+    required this.lineColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final startX = (size.width / 2) + (startAlignX * (size.width / 2));
+    final endX = (size.width / 2) + (endAlignX * (size.width / 2));
+
+    final paint = Paint()
+      ..color = lineColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.5
+      ..strokeCap = StrokeCap.round;
+
+    final path = Path();
+    path.moveTo(startX, 35);
+    path.cubicTo(startX, 52, endX, 53, endX, 70);
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _RoadmapSegmentPainter oldDelegate) {
+    return oldDelegate.startAlignX != startAlignX ||
+        oldDelegate.endAlignX != endAlignX ||
+        oldDelegate.lineColor != lineColor;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Orbital pulsing hero logo widget
+// ---------------------------------------------------------------------------
+class _OrbitalHeroLogo extends StatefulWidget {
+  final Color accentColor;
+  final VoidCallback? onTap;
+  const _OrbitalHeroLogo({required this.accentColor, this.onTap});
+
+  @override
+  State<_OrbitalHeroLogo> createState() => _OrbitalHeroLogoState();
+}
+
+class _OrbitalHeroLogoState extends State<_OrbitalHeroLogo>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _rotationAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      duration: const Duration(milliseconds: 3200),
+      vsync: this,
+    )..repeat();
+    _rotationAnim = Tween<double>(begin: 0.0, end: 2 * math.pi).animate(_ctrl);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, _) {
+        final scale = _ctrl.value <= 0.5
+            ? (0.88 + (_ctrl.value * 2 * 0.22))
+            : (1.10 - ((_ctrl.value - 0.5) * 2 * 0.22));
+
+        return GestureDetector(
+          onTap: () {
+            if (widget.onTap != null) {
+              HapticFeedback.selectionClick();
+              widget.onTap!();
+            }
+          },
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 105,
+                height: 105,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    // Outer Ambient Glow Aura
+                    Container(
+                      width: 95 * scale,
+                      height: 95 * scale,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: widget.accentColor.withValues(alpha: 0.15),
+                        boxShadow: [
+                          BoxShadow(
+                            color: widget.accentColor.withValues(alpha: 0.35 * scale),
+                            blurRadius: 32 * scale,
+                            spreadRadius: 4,
+                          ),
+                        ],
+                      ),
+                    ),
+                    // Outer Orbit Ring
+                    Transform.rotate(
+                      angle: _rotationAnim.value,
+                      child: Container(
+                        width: 82,
+                        height: 82,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: widget.accentColor.withValues(alpha: 0.35),
+                            width: 1.5,
+                          ),
+                        ),
+                        child: Align(
+                          alignment: Alignment.topCenter,
+                          child: Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: widget.accentColor,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: widget.accentColor,
+                                  blurRadius: 8,
+                                  spreadRadius: 2,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Inner Core Container
+                    Container(
+                      width: 62,
+                      height: 62,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: RadialGradient(
+                          colors: [
+                            widget.accentColor.withValues(alpha: 0.65),
+                            widget.accentColor.withValues(alpha: 0.12),
+                          ],
+                        ),
+                        border: Border.all(
+                          color: widget.accentColor.withValues(alpha: 0.75),
+                          width: 1.8,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.3),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Center(
+                        child: Icon(
+                          Icons.bolt_rounded,
+                          color: widget.accentColor,
+                          size: 34,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                decoration: BoxDecoration(
+                  color: widget.accentColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: widget.accentColor.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.map_outlined, size: 11, color: widget.accentColor),
+                    const SizedBox(width: 4),
+                    Text(
+                      'TAP FOR LEVEL MAP',
+                      style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.4,
+                        color: widget.accentColor,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -1538,6 +4035,10 @@ class SparkParticle {
   double x, y, vx, vy, size, alpha, lifetime;
   final Color color;
   final double maxLifetime;
+  final bool isConfetti;
+  double rotation;
+  double rotationSpeed;
+  double width;
 
   SparkParticle({
     required this.x,
@@ -1547,13 +4048,23 @@ class SparkParticle {
     required this.size,
     required this.color,
     required this.maxLifetime,
+    this.isConfetti = false,
+    this.rotation = 0.0,
+    this.rotationSpeed = 0.0,
+    this.width = 0.0,
   })  : alpha = 1.0,
         lifetime = 0.0;
 
   void update(double dt) {
     x += vx * dt;
     y += vy * dt;
-    vy += 90.0 * dt;
+    if (isConfetti) {
+      vy += 120.0 * dt;
+      vx *= 0.98;
+      rotation += rotationSpeed * dt;
+    } else {
+      vy += 90.0 * dt;
+    }
     lifetime += dt;
     alpha = (1.0 - (lifetime / maxLifetime)).clamp(0.0, 1.0);
   }
@@ -1583,6 +4094,40 @@ class ParticleManager extends ChangeNotifier {
         size: 2.0 + rng.nextDouble() * 4.5,
         color: color,
         maxLifetime: 0.38 + rng.nextDouble() * 0.52,
+      ));
+    }
+    notifyListeners();
+  }
+
+  void spawnConfettiBurst(double cx, double cy, int count) {
+    final rng = math.Random();
+    final List<Color> confettiColors = const [
+      Color(0xFFEC4899), // Neon Pink
+      Color(0xFF06B6D4), // Cyan
+      Color(0xFFF59E0B), // Gold
+      Color(0xFF8B5CF6), // Purple
+      Color(0xFF10B981), // Emerald
+      Color(0xFFF97316), // Orange
+      Color(0xFFEF4444), // Crimson
+    ];
+
+    for (int i = 0; i < count; i++) {
+      final angle = rng.nextDouble() * 2 * math.pi;
+      final speed = 130.0 + rng.nextDouble() * 250.0;
+      final color = confettiColors[rng.nextInt(confettiColors.length)];
+
+      particles.add(SparkParticle(
+        x: cx,
+        y: cy,
+        vx: math.cos(angle) * speed,
+        vy: math.sin(angle) * speed - 160.0,
+        size: 4.5 + rng.nextDouble() * 4.5,
+        color: color,
+        maxLifetime: 1.1 + rng.nextDouble() * 0.8,
+        isConfetti: true,
+        rotation: rng.nextDouble() * 2 * math.pi,
+        rotationSpeed: (rng.nextDouble() - 0.5) * 12.0,
+        width: 9.0 + rng.nextDouble() * 9.0,
       ));
     }
     notifyListeners();
@@ -1622,10 +4167,590 @@ class ParticlePainter extends CustomPainter {
     final paint = Paint()..style = PaintingStyle.fill;
     for (final p in particles) {
       paint.color = p.color.withValues(alpha: p.alpha);
-      canvas.drawCircle(Offset(p.x, p.y), p.size, paint);
+      if (p.isConfetti) {
+        canvas.save();
+        canvas.translate(p.x, p.y);
+        canvas.rotate(p.rotation);
+        canvas.drawRect(
+          Rect.fromCenter(
+            center: Offset.zero,
+            width: p.width,
+            height: p.size,
+          ),
+          paint,
+        );
+        canvas.restore();
+      } else {
+        canvas.drawCircle(Offset(p.x, p.y), p.size, paint);
+      }
     }
   }
 
   @override
   bool shouldRepaint(covariant ParticlePainter oldDelegate) => true;
 }
+
+// ---------------------------------------------------------------------------
+// Leaderboard Data Model
+// ---------------------------------------------------------------------------
+class LeaderboardEntry {
+  final String playerName;
+  final int level;
+  final int streak;
+  final DateTime date;
+
+  LeaderboardEntry({
+    required this.playerName,
+    required this.level,
+    required this.streak,
+    required this.date,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'playerName': playerName,
+        'level': level,
+        'streak': streak,
+        'date': date.toIso8601String(),
+      };
+
+  factory LeaderboardEntry.fromJson(Map<String, dynamic> json) {
+    return LeaderboardEntry(
+      playerName: json['playerName'] as String? ?? 'Mindful Player',
+      level: json['level'] as int? ?? 1,
+      streak: json['streak'] as int? ?? 0,
+      date: json['date'] != null
+          ? DateTime.tryParse(json['date'] as String) ?? DateTime.now()
+          : DateTime.now(),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1: Full-Screen Company Logo Splash Screen
+// ---------------------------------------------------------------------------
+class _CompanySplashScreen extends StatefulWidget {
+  final GameTheme theme;
+  final VoidCallback onComplete;
+
+  const _CompanySplashScreen({
+    required this.theme,
+    required this.onComplete,
+  });
+
+  @override
+  State<_CompanySplashScreen> createState() => _CompanySplashScreenState();
+}
+
+class _CompanySplashScreenState extends State<_CompanySplashScreen>
+    with TickerProviderStateMixin {
+  late AnimationController _fadeController;
+  late Animation<double> _fadeAnimation;
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
+  late Animation<double> _rotationAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _fadeController = AnimationController(
+      duration: const Duration(milliseconds: 2000),
+      vsync: this,
+    );
+    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _fadeController, curve: Curves.easeInOut),
+    );
+
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 2400),
+      vsync: this,
+    )..repeat(reverse: true);
+
+    _pulseAnimation = Tween<double>(begin: 0.92, end: 1.08).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+    _rotationAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(_pulseController);
+
+    _fadeController.forward();
+    Timer(const Duration(milliseconds: 2200), () {
+      if (mounted) {
+        widget.onComplete();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _fadeController.dispose();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedGradientBackground(
+      colors: widget.theme.bgGradient,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: FadeTransition(
+          opacity: _fadeAnimation,
+          child: SafeArea(
+            child: Stack(
+              children: [
+                // Ambient center radial glow
+                Center(
+                  child: Container(
+                    width: 320,
+                    height: 320,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: RadialGradient(
+                        colors: [
+                          widget.theme.accentColor.withValues(alpha: 0.25),
+                          widget.theme.accentColor.withValues(alpha: 0.05),
+                          Colors.transparent,
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+                Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // Company Logo Shield Emblem
+                      AnimatedBuilder(
+                        animation: _pulseController,
+                        builder: (context, child) {
+                          return Transform.scale(
+                            scale: _pulseAnimation.value,
+                            child: Container(
+                              width: 120,
+                              height: 120,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(32),
+                                color: widget.theme.panelBg.withValues(alpha: 0.6),
+                                border: Border.all(
+                                  color: widget.theme.accentColor.withValues(alpha: 0.8),
+                                  width: 2.5,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: widget.theme.accentColor.withValues(alpha: 0.5),
+                                    blurRadius: 36,
+                                    spreadRadius: 6,
+                                  ),
+                                ],
+                              ),
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  Transform.rotate(
+                                    angle: _rotationAnimation.value * 6.28,
+                                    child: Container(
+                                      width: 98,
+                                      height: 98,
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(24),
+                                        border: Border.all(
+                                          color: widget.theme.tileActiveGlow.withValues(alpha: 0.45),
+                                          width: 1.5,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Icon(
+                                    Icons.auto_awesome_mosaic_rounded,
+                                    size: 52,
+                                    color: widget.theme.accentColor,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 36),
+
+                      // Company Name
+                      Text(
+                        'MINDFUL MATRIX',
+                        style: GoogleFonts.orbitron(
+                          fontSize: 26,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 5.0,
+                          color: widget.theme.textPrimary,
+                          shadows: [
+                            Shadow(
+                              color: widget.theme.accentColor.withValues(alpha: 0.7),
+                              blurRadius: 24,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+
+                      // Subtitle
+                      Text(
+                        'INTERACTIVE STUDIOS',
+                        style: GoogleFonts.spaceGrotesk(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 4.0,
+                          color: widget.theme.accentColor.withValues(alpha: 0.85),
+                        ),
+                      ),
+                      const SizedBox(height: 60),
+
+                      // Footer Presenter Tag
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: widget.theme.tileDefault.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: widget.theme.panelBorder.withValues(alpha: 0.3),
+                            width: 1,
+                          ),
+                        ),
+                        child: Text(
+                          'P R E S E N T S',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 4.5,
+                            color: widget.theme.textPrimary.withValues(alpha: 0.6),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: Full-Screen Game Launch Splash Screen with Progress Loading Bar
+// ---------------------------------------------------------------------------
+class _FullScreenSplashScreen extends StatefulWidget {
+  final GameTheme theme;
+  final VoidCallback onLoadingComplete;
+
+  const _FullScreenSplashScreen({
+    required this.theme,
+    required this.onLoadingComplete,
+  });
+
+  @override
+  State<_FullScreenSplashScreen> createState() => _FullScreenSplashScreenState();
+}
+
+class _FullScreenSplashScreenState extends State<_FullScreenSplashScreen>
+    with TickerProviderStateMixin {
+  late AnimationController _progressController;
+  late Animation<double> _progressAnimation;
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
+  late Animation<double> _rotationAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _progressController = AnimationController(
+      duration: const Duration(milliseconds: 3000),
+      vsync: this,
+    );
+    _progressAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _progressController, curve: Curves.easeInOutCubic),
+    );
+
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 2800),
+      vsync: this,
+    )..repeat(reverse: true);
+
+    _pulseAnimation = Tween<double>(begin: 0.90, end: 1.10).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
+    _rotationAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(_pulseController);
+
+    _progressController.forward();
+    _progressController.addStatusListener((status) {
+      if (status == AnimationStatus.completed) {
+        widget.onLoadingComplete();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _progressController.dispose();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedGradientBackground(
+      colors: widget.theme.bgGradient,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: SafeArea(
+          child: Stack(
+            children: [
+              // Ambient background spark glow
+              Center(
+                child: Container(
+                  width: 280,
+                  height: 280,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(
+                      colors: [
+                        widget.theme.accentColor.withValues(alpha: 0.22),
+                        widget.theme.accentColor.withValues(alpha: 0.05),
+                        Colors.transparent,
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+
+              Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // Studio Branding Tag Badge
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: widget.theme.accentColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: widget.theme.accentColor.withValues(alpha: 0.4),
+                            width: 1,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: widget.theme.accentColor.withValues(alpha: 0.15),
+                              blurRadius: 12,
+                            ),
+                          ],
+                        ),
+                        child: Text(
+                          '✦ MINDFUL MATRIX STUDIOS ✦',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 3.5,
+                            color: widget.theme.accentColor,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 32),
+
+                      // Dedicated Splash Cosmic Spark Emblem
+                      AnimatedBuilder(
+                        animation: _pulseController,
+                        builder: (context, child) {
+                          return Transform.scale(
+                            scale: _pulseAnimation.value,
+                            child: Container(
+                              width: 110,
+                              height: 110,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: widget.theme.panelBg.withValues(alpha: 0.6),
+                                border: Border.all(
+                                  color: widget.theme.accentColor.withValues(alpha: 0.7),
+                                  width: 2,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: widget.theme.accentColor.withValues(alpha: 0.5),
+                                    blurRadius: 28,
+                                    spreadRadius: 4,
+                                  ),
+                                ],
+                              ),
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  // Rotating energy ring
+                                  Transform.rotate(
+                                    angle: _rotationAnimation.value * 6.28,
+                                    child: Container(
+                                      width: 92,
+                                      height: 92,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                          color: widget.theme.tileActiveGlow.withValues(alpha: 0.4),
+                                          width: 1.5,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Icon(
+                                    Icons.auto_awesome_rounded,
+                                    size: 48,
+                                    color: widget.theme.accentColor,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 32),
+
+                      // Gradient Shader Futuristic Orbitron Title Text
+                      ShaderMask(
+                        shaderCallback: (bounds) => LinearGradient(
+                          colors: [
+                            Colors.white,
+                            widget.theme.accentColor,
+                            widget.theme.tileActiveGlow,
+                          ],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ).createShader(bounds),
+                        child: Text(
+                          'FOCUS SPARK',
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.orbitron(
+                            fontSize: 34,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 6.0,
+                            color: Colors.white,
+                            shadows: [
+                              Shadow(
+                                color: widget.theme.accentColor.withValues(alpha: 0.8),
+                                blurRadius: 28,
+                              ),
+                              Shadow(
+                                color: widget.theme.accentColor.withValues(alpha: 0.4),
+                                blurRadius: 52,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+
+                      // Subtitle Tagline Badge
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: widget.theme.tileDefault.withValues(alpha: 0.25),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: widget.theme.panelBorder.withValues(alpha: 0.3),
+                            width: 1,
+                          ),
+                        ),
+                        child: Text(
+                          'ELEVATE YOUR MEMORY & FOCUS',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 2.8,
+                            color: widget.theme.textPrimary.withValues(alpha: 0.75),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 48),
+
+                      // Animated Progress Loading Bar
+                      AnimatedBuilder(
+                        animation: _progressAnimation,
+                        builder: (context, child) {
+                          final progress = _progressAnimation.value;
+                          final percent = (progress * 100).toInt();
+
+                          return Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 240,
+                                height: 8,
+                                decoration: BoxDecoration(
+                                  color: widget.theme.tileDefault.withValues(alpha: 0.35),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(
+                                    color: widget.theme.panelBorder.withValues(alpha: 0.4),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(4),
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: FractionallySizedBox(
+                                      widthFactor: progress,
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(
+                                            colors: [
+                                              widget.theme.accentColor,
+                                              widget.theme.tileActiveGlow,
+                                            ],
+                                          ),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: widget.theme.accentColor.withValues(alpha: 0.85),
+                                              blurRadius: 10,
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: widget.theme.panelBg.withValues(alpha: 0.5),
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: widget.theme.panelBorder.withValues(alpha: 0.4),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: Text(
+                                  'INITIALIZING MATRIX... $percent%',
+                                  style: GoogleFonts.orbitron(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 2.2,
+                                    color: widget.theme.accentColor,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+

@@ -11,4 +11,13 @@ abstract class AudioService {
 
   /// Play a synthesizer chime tone with a specified frequency and duration (in seconds).
   void playTone(double frequency, double durationSeconds);
+
+  /// Start ambient background music pad.
+  void startAmbientMusic();
+
+  /// Stop ambient background music pad.
+  void stopAmbientMusic();
+
+  /// Trigger native hardware device vibration.
+  void vibrate({int durationMs = 40});
 }
