@@ -220,6 +220,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   bool _isBannerAdLoaded = false;
   String _activeAdType = 'REWARDED VIDEO TEST AD';
 
+  late AnimationController _tutorialHandController;
+  bool _isVisualTutorialActive = false;
+
   @override
   void initState() {
     super.initState();
@@ -240,6 +243,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       parent: _praiseController,
       curve: const Interval(0.65, 1.0, curve: Curves.easeOut),
     );
+
+    _tutorialHandController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
 
     _loadSettings();
     _initAdMobBanner();
@@ -287,6 +295,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _praiseController.dispose();
+    _tutorialHandController.dispose();
     _bannerAd?.dispose();
     _particleManager.disposeTicker();
     _particleManager.dispose();
@@ -346,6 +355,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _selectedThemeIndex = _prefs.getInt('focus_spark_theme_index') ?? 0;
       _hasSeenTutorial = _prefs.getBool('focus_spark_has_seen_tutorial') ?? false;
       _showTutorialCard = !_hasSeenTutorial;
+      if (!_hasSeenTutorial) {
+        _isVisualTutorialActive = true;
+      }
 
       if (hasSavedGame && loadedSequence.isNotEmpty) {
         _hasSavedSession = true;
@@ -627,6 +639,17 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
   }
 
+  void _startVisualTutorial() {
+    if (!mounted) return;
+    setState(() {
+      _isVisualTutorialActive = true;
+      _hasSeenTutorial = true;
+      _showTutorialCard = false;
+    });
+    _prefs.setBool('focus_spark_has_seen_tutorial', true);
+    _startSession();
+  }
+
   // ── Session Control ──────────────────────────────────────────────────────
   void _startSession() async {
     void launchGame() {
@@ -717,13 +740,16 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     if (_gameState != GameState.playback) return;
     final currentSession = _playbackSessionId;
 
-    // Adaptive speed: Max(380ms, 650ms - level*25ms)
-    final int speedMs = (650 - (_level * 25)).clamp(380, 650);
-    final int activeMs = (speedMs * 0.75).round();
-    final int gapMs = speedMs - activeMs;
+    final bool isTutorialMode = _isVisualTutorialActive && _level <= 2;
 
-    // Brief pre-playback pause so user can settle
-    await Future.delayed(const Duration(milliseconds: 300));
+    // Adaptive speed: Max(380ms, 650ms - level*25ms)
+    final int speedMs = isTutorialMode ? 1600 : (650 - (_level * 25)).clamp(380, 650);
+    final int activeMs = isTutorialMode ? 1000 : (speedMs * 0.75).round();
+    final int gapMs = isTutorialMode ? 600 : (speedMs - activeMs);
+
+    // Pre-playback pause (2.4s) so user can comfortably read Step 1 text before flashes start
+    final int prePauseMs = isTutorialMode ? 2400 : 300;
+    await Future.delayed(Duration(milliseconds: prePauseMs));
     if (_gameState != GameState.playback || _playbackSessionId != currentSession) return;
 
     for (int i = 0; i < _sequence.length; i++) {
@@ -747,6 +773,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
 
     if (_gameState == GameState.playback && _playbackSessionId == currentSession) {
+      if (isTutorialMode) {
+        // Generous 2.2s transition pause so user can comfortably read Step 2 text before tapping
+        await Future.delayed(const Duration(milliseconds: 2200));
+        if (_gameState != GameState.playback || _playbackSessionId != currentSession) return;
+      }
       setState(() {
         _gameState = GameState.playerInput;
         _playerInput.clear();
@@ -758,6 +789,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   // ── Input Timer ──────────────────────────────────────────────────────────
   void _startInputTimer() {
     _cancelInputTimer();
+    if (_isVisualTutorialActive && _level <= 2) {
+      setState(() {
+        _inputTimerPercentage = 1.0;
+      });
+      return;
+    }
     _totalInputTime = 6.0 + (_sequence.length * 1.2);
     _elapsedInputTime = 0.0;
     _inputTimerPercentage = 1.0;
@@ -1134,6 +1171,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             _highScore = _level;
             _prefs.setInt('focus_spark_high_score', _highScore);
           }
+
+          if (_isVisualTutorialActive && _level > 2) {
+            _isVisualTutorialActive = false;
+            _hasSeenTutorial = true;
+            _prefs.setBool('focus_spark_has_seen_tutorial', true);
+          }
         });
         _recordLeaderboardScore(completedLevel, _currentStreak);
 
@@ -1269,10 +1312,28 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _playerInput.isNotEmpty &&
         _playerInput.last == index;
 
-    return _HintTilePulse(
-      isHinted: isHinted,
-      pulseColor: theme.tileActiveGlow,
-      child: MouseRegion(
+    // Spotlight Focus Dimming during Level 1 & 2 Visual Tutorial
+    final bool isTutorialActive = _isVisualTutorialActive && _level <= 2;
+    int? activeTutorialTargetTile;
+    if (isTutorialActive) {
+      if (_gameState == GameState.playback) {
+        activeTutorialTargetTile = _activePlaybackTile;
+      } else if (_gameState == GameState.playerInput && _playerInput.length < _sequence.length) {
+        activeTutorialTargetTile = _sequence[_playerInput.length];
+      }
+    }
+
+    final double tileOpacity = (isTutorialActive && activeTutorialTargetTile != null && index != activeTutorialTargetTile)
+        ? 0.28
+        : 1.0;
+
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 250),
+      opacity: tileOpacity,
+      child: _HintTilePulse(
+        isHinted: isHinted,
+        pulseColor: theme.tileActiveGlow,
+        child: MouseRegion(
         cursor: inputLock ? SystemMouseCursors.basic : SystemMouseCursors.click,
         onEnter: (_) {
           if (!inputLock) setState(() => _hoverStates[index] = true);
@@ -1352,11 +1413,15 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           ),
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 
   // ── Input Timer Bar ──────────────────────────────────────────────────────
   Widget _buildInputTimerBar(GameTheme theme) {
+    if (_isVisualTutorialActive && _level <= 2) {
+      return const SizedBox(height: 0, width: double.infinity);
+    }
     final remainingSecs = math.max(0.0, _totalInputTime - _elapsedInputTime);
     final pct = _inputTimerPercentage.clamp(0.0, 1.0);
 
@@ -1727,6 +1792,156 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     );
   }
 
+  // ── Interactive Animated Visual Tutorial Overlay ─────────────────────────
+  Widget _buildInteractiveTutorialOverlay(GameTheme theme) {
+    if (!_isVisualTutorialActive || _level > 2 || _gameState == GameState.startScreen || _gameState == GameState.paused) {
+      return const SizedBox.shrink();
+    }
+
+    int? targetTileIndex;
+    String stepTitle = '';
+    String stepInstruction = '';
+    Color stepGlowColor = theme.accentColor;
+
+    if (_gameState == GameState.playback) {
+      targetTileIndex = _activePlaybackTile;
+      stepTitle = 'STEP 1: WATCH THE SPARK 👁️';
+      stepInstruction = targetTileIndex != null
+          ? 'Watch the tiles flash in sequence!'
+          : 'Get ready to observe the sequence!';
+      stepGlowColor = theme.tileActiveGlow;
+    } else if (_gameState == GameState.playerInput) {
+      if (_playerInput.length < _sequence.length) {
+        targetTileIndex = _sequence[_playerInput.length];
+        stepTitle = 'STEP 2: REPLICATE PATTERN 🎯';
+        stepInstruction = 'Now tap the exact same tile!';
+        stepGlowColor = const Color(0xFFFFD700);
+      }
+    }
+
+    final double spacing = 12.0;
+    final double tileSize = (_gridWidth - (spacing * 2)) / 3.0;
+
+    double? targetX;
+    double? targetY;
+    if (targetTileIndex != null) {
+      final int row = targetTileIndex ~/ 3;
+      final int col = targetTileIndex % 3;
+      targetX = (col * (tileSize + spacing)) + (tileSize / 2.0);
+      targetY = (row * (tileSize + spacing)) + (tileSize / 2.0);
+    }
+
+    final bool isTopRowTarget = targetTileIndex != null && targetTileIndex < 3;
+
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: AnimatedBuilder(
+          animation: _tutorialHandController,
+          builder: (context, child) {
+            final bounceOffset = _tutorialHandController.value * 12.0;
+            return Stack(
+              children: [
+                // Glowing Target Pulsing Halo Ring & Hand Pointer Icon (when target tile is active)
+                if (targetX != null && targetY != null) ...[
+                  Positioned(
+                    left: targetX - 32,
+                    top: targetY - 32,
+                    child: Container(
+                      width: 64,
+                      height: 64,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: stepGlowColor, width: 2.5),
+                        boxShadow: [
+                          BoxShadow(
+                            color: stepGlowColor.withValues(alpha: 0.6),
+                            blurRadius: 18 + (_tutorialHandController.value * 10),
+                            spreadRadius: 2,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: targetX - 20,
+                    top: targetY + 10 + bounceOffset,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.touch_app_rounded,
+                          size: 40,
+                          color: stepGlowColor,
+                          shadows: [
+                            Shadow(
+                              color: stepGlowColor,
+                              blurRadius: 14,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+
+                // Pure Floating 3D Neon Tutorial Text (No dialogue box)
+                Positioned(
+                  top: isTopRowTarget ? null : 8,
+                  bottom: isTopRowTarget ? 8 : null,
+                  left: 12,
+                  right: 12,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        stepTitle,
+                        style: GoogleFonts.orbitron(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1.4,
+                          color: stepGlowColor,
+                          shadows: [
+                            Shadow(
+                              color: Colors.black.withValues(alpha: 0.9),
+                              blurRadius: 10,
+                              offset: const Offset(0, 2),
+                            ),
+                            Shadow(
+                              color: stepGlowColor.withValues(alpha: 0.8),
+                              blurRadius: 16,
+                            ),
+                          ],
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        stepInstruction,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                          shadows: [
+                            Shadow(
+                              color: Colors.black.withValues(alpha: 0.9),
+                              blurRadius: 8,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   // ── Pause Overlay ────────────────────────────────────────────────────────
   Widget _buildPauseOverlay(GameTheme theme) {
     return Positioned.fill(
@@ -2088,6 +2303,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                      _buildPauseOverlay(theme),
                                      // Direct Rewarded Ad overlay
                                      _buildDirectAdOverlay(theme),
+                                      // Interactive Visual Tutorial Overlay
+                                      _buildInteractiveTutorialOverlay(theme),
                                    ],
                                  ),
 
@@ -2734,8 +2951,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                       const SizedBox(height: 20),
                       SizedBox(
                         width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: () => Navigator.of(context).pop(),
+                        child: ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.of(context).pop();
+                            _startVisualTutorial();
+                          },
                           style: ElevatedButton.styleFrom(
                             backgroundColor: theme.accentColor,
                             foregroundColor: Colors.black87,
@@ -2744,14 +2964,23 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                             ),
                             padding: const EdgeInsets.symmetric(vertical: 12),
                           ),
-                          child: const Text(
-                            'GOT IT!',
-                            style: TextStyle(
-                              fontSize: 12,
+                          icon: const Icon(Icons.touch_app_rounded, size: 18),
+                          label: Text(
+                            'START VISUAL DEMO 👆',
+                            style: GoogleFonts.orbitron(
+                              fontSize: 11,
                               fontWeight: FontWeight.bold,
-                              letterSpacing: 1.5,
+                              letterSpacing: 1.1,
                             ),
                           ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        child: TextButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: const Text('GOT IT!'),
                         ),
                       ),
                     ],
