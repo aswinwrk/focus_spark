@@ -1,6 +1,6 @@
-# Focus Spark — Project Summary
+# Brain Reboot — Project Summary
 
-**Focus Spark** is an immersive, gamified mindfulness memory app built with Flutter. It challenges users' focus and memory capacity by presenting pentatonic tone and visual tile sequences on a 3x3 interactive matrix. 
+**Brain Reboot** (formerly Focus Spark) is an immersive, gamified mindfulness memory app built with Flutter. Designed to clear brain fog, boost alertness, and elevate focus, it challenges users' memory capacity by presenting pentatonic tone and visual tile sequences on a 3x3 interactive matrix.
 
 ---
 
@@ -24,8 +24,9 @@
     *   `lib/models/`: `game_theme.dart`, `particle.dart`, `leaderboard_entry.dart`.
     *   `lib/utils/`: `particle_manager.dart` (ParticleManager & ParticlePainter).
     *   `lib/ui/components/`: `animated_gradient_bg.dart`, `shake_widget.dart`, `hint_tile_pulse.dart`.
-    *   `lib/ui/screens/`: `company_splash_screen.dart`, `fullscreen_splash_screen.dart`.
+    *   `lib/ui/screens/`: `company_splash_screen.dart` (Full-screen **ASTA FUN GAME STUDIO** logo splash), `fullscreen_splash_screen.dart` (Stage 2 splash displaying **ONLY the Game Name `BRAIN REBOOT`** & tagline *CLEAR BRAIN FOG & ELEVATE FOCUS* with matrix loading progress bar).
     *   *Zero Regression*: Preserved 100% of game mechanics, visual aesthetics, particle physics, 👆 Spotlight Focus Dimming tutorial, audio synthesis, and ad integrations. Verified with 100% clean test execution (`flutter test`).
+*   **Initial Pop-Up Text Announcement & Level 5+ Reverse Mind Challenge Rounds (`_isReverseLevel(level)`):** Integrated Reverse Challenge Rounds directly into Classic Mode progression as milestone surprise levels starting from **Level 5 onwards** (`level >= 5 && level % 5 == 0`, i.e., Levels 5, 10, 15, 20...). When a Reverse Level loads, a centered glassmorphic pop-up text overlay (**`_buildReverseModeAnnouncementOverlay`**) displays **FIRST** for 2.2s (*"🔄 REVERSE MODE! Tap the pattern in reverse order — last tile first!"*), accompanied by an ascending 3-note synth warning chime (`_playReverseLevelWarningTone`). Features a **Full Background Gradient Shift (`reverseTheme`)** to Deep Magenta / Cyber Purple (`#230338` $\rightarrow$ `#480766`), a top pinned toast card (`_buildReverseRoundBanner`), and special reverse praise popups (`REVERSE MASTERMIND! 🔄⚡`). Guided hand pointer 👆 is strictly reserved for initial visual onboarding (Levels 1 & 2).
 *   **Full-Screen Ad Lifecycle Pause & Resume Engine:** Integrated `onAdOpened` and `onAdClosed` lifecycle listeners in `AdService` and `_FocusSparkScreenState`. When a Rewarded or Interstitial ad displays, ambient background music automatically pauses (`AudioService.instance.stopAmbientMusic()`), input timers stop (`_cancelInputTimer()`), and game state freezes (`_gameState = GameState.paused`). Updated `_startSession()` to launch Level 1 immediately (`launchGame()`) without triggering Interstitial ads on fresh installs, cleared app data, or new game starts. Interstitial ads strictly display on level completion milestones (Levels 6, 8, 10, 12, 14, 16+) as configured in `AdService.shouldShowInterstitialOnLevelComplete()`.
 *   **Interactive Animated Visual Guided Tutorial System (👆):** Implemented a guided tutorial overlay (`_buildInteractiveTutorialOverlay()`) featuring an animated floating hand pointer icon 👆 (`_tutorialHandController`), target pulsing halo rings over matrix tiles, and step-by-step floating Orbitron 3D neon text typography:
     *   *Generous Step Pauses & Unhurried Reading*: Added a **2.4-second pre-playback pause** before Step 1 sequence flashes start so players can comfortably read *"Get ready to observe the sequence..."*, slowed tile flashes to **1000ms (1 full second)** with **600ms gap**, and added a **2.2-second transition pause** before Step 2 player input begins so players can comfortably read *"Now tap the exact same tile!"*.

@@ -59,3 +59,15 @@ const List<GameTheme> gameThemes = [
     successColor: Color(0xFF06B6D4),
   ),
 ];
+
+const GameTheme reverseTheme = GameTheme(
+  name: 'Reverse Cyber Inversion',
+  bgGradient: [Color(0xFF230338), Color(0xFF480766), Color(0xFF10011B)],
+  panelBg: Color(0x2B480766),
+  panelBorder: Color(0xFFEC4899),
+  tileActiveGlow: Color(0xFFF43F5E),
+  tileDefault: Color(0x18FFFFFF),
+  textPrimary: Colors.white,
+  accentColor: Color(0xFFEC4899),
+  successColor: Color(0xFF10B981),
+);

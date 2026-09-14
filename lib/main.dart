@@ -43,7 +43,7 @@ class FocusSparkApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Focus Spark',
+      title: 'Brain Reboot',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -157,6 +157,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   late AnimationController _tutorialHandController;
   bool _isVisualTutorialActive = false;
+  bool _showReverseAnnouncementOverlay = false;
 
   @override
   void initState() {
@@ -338,7 +339,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         loadedLeaderboard = [
           LeaderboardEntry(playerName: 'Zen Master', level: 12, streak: 12, date: now.subtract(const Duration(days: 1))),
           LeaderboardEntry(playerName: 'Mindful Seeker', level: 9, streak: 9, date: now.subtract(const Duration(days: 3))),
-          LeaderboardEntry(playerName: 'Focus Sparker', level: 7, streak: 7, date: now.subtract(const Duration(days: 5))),
+          LeaderboardEntry(playerName: 'Brain Rebooter', level: 7, streak: 7, date: now.subtract(const Duration(days: 5))),
           LeaderboardEntry(playerName: 'Memory Runner', level: 5, streak: 5, date: now.subtract(const Duration(days: 7))),
           LeaderboardEntry(playerName: 'Calm Thinker', level: 3, streak: 3, date: now.subtract(const Duration(days: 9))),
         ];
@@ -474,6 +475,17 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     });
   }
 
+  void _playReverseLevelWarningTone() {
+    if (_isSfxMuted) return;
+    AudioService.instance.playTone(130.81, 0.12);
+    Future.delayed(const Duration(milliseconds: 100), () {
+      AudioService.instance.playTone(261.63, 0.14);
+      Future.delayed(const Duration(milliseconds: 120), () {
+        AudioService.instance.playTone(523.25, 0.22);
+      });
+    });
+  }
+
   // ── Praise Text Engine ───────────────────────────────────────────────────
   void _triggerPraiseText(String text, Color glowColor) {
     setState(() {
@@ -483,7 +495,18 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     _praiseController.forward(from: 0.0);
   }
 
+  bool _isReverseLevel(int level) => level >= 5 && level % 5 == 0;
+
   String _getPraiseForLevel(int completedLevel) {
+    if (_isReverseLevel(completedLevel)) {
+      final List<String> reversePraises = [
+        'REVERSE MASTERMIND! 🔄⚡',
+        'MIND FLIPPED! 🧠💥',
+        'SYNAPSE INVERSION! ⚡🔄',
+        'REVERSE SPARK! 💥🔄',
+      ];
+      return reversePraises[(completedLevel ~/ 5) % reversePraises.length];
+    }
     final List<String> tier1 = ['NICE FOCUS! 🎯', 'SPARK! ⚡', 'SHARP! ⚔️', 'SMART MOVE! 💡'];
     final List<String> tier2 = ['SYNAPSE SURGE! ⚡', 'BRILLIANT! 🌟', 'HYPER FOCUS! 👁️', 'LASER MATRIX! 🔮'];
     final List<String> tier3 = ['SUPERCHARGED! 🔋', 'BRAIN POWER! 🧠', 'UNSTOPPABLE! 🚀', 'LIGHTNING MIND! ⚡'];
@@ -681,14 +704,26 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     final bool isTutorialMode = _isVisualTutorialActive && _level <= 2;
 
+    final bool isReverseMode = _isReverseLevel(_level);
+    if (isReverseMode) {
+      _playReverseLevelWarningTone();
+      _triggerHaptic(HapticType.heavy);
+      if (mounted) {
+        setState(() => _showReverseAnnouncementOverlay = true);
+      }
+    }
+
     // Adaptive speed: Max(380ms, 650ms - level*25ms)
     final int speedMs = isTutorialMode ? 1600 : (650 - (_level * 25)).clamp(380, 650);
     final int activeMs = isTutorialMode ? 1000 : (speedMs * 0.75).round();
     final int gapMs = isTutorialMode ? 600 : (speedMs - activeMs);
 
-    // Pre-playback pause (2.4s) so user can comfortably read Step 1 text before flashes start
-    final int prePauseMs = isTutorialMode ? 2400 : 300;
+    // Pre-playback pause (2.4s for tutorial, 2.2s for Reverse Mode announcement) so user can comfortably read text
+    final int prePauseMs = isTutorialMode ? 2400 : (isReverseMode ? 2200 : 300);
     await Future.delayed(Duration(milliseconds: prePauseMs));
+    if (_showReverseAnnouncementOverlay && mounted) {
+      setState(() => _showReverseAnnouncementOverlay = false);
+    }
     if (_gameState != GameState.playback || _playbackSessionId != currentSession) return;
 
     for (int i = 0; i < _sequence.length; i++) {
@@ -1089,7 +1124,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       });
     }
 
-    final expectedIndex = _sequence[_playerInput.length];
+    final bool isReverse = _isReverseLevel(_level);
+    final expectedIndex = isReverse
+        ? _sequence[_sequence.length - 1 - _playerInput.length]
+        : _sequence[_playerInput.length];
     final theme = _themes[_selectedThemeIndex];
 
     if (clickedIndex == expectedIndex) {
@@ -1170,17 +1208,22 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Status Text ──────────────────────────────────────────────────────────
   String _getStatusText() {
+    final bool isReverse = _isReverseLevel(_level);
     switch (_gameState) {
       case GameState.startScreen:
         return 'Clear your mind. Tap Start to begin.';
       case GameState.playback:
-        return 'Watch the spark pattern carefully...';
+        return isReverse
+            ? '🔄 Watch pattern... Tap in REVERSE order!'
+            : 'Watch the spark pattern carefully...';
       case GameState.playerInput:
-        return 'Now replicate the pattern from memory.';
+        return isReverse
+            ? '🔄 Tap the pattern in REVERSE order!'
+            : 'Now replicate the pattern from memory.';
       case GameState.paused:
         return 'Breathe in, breathe out. Session paused.';
       case GameState.successTransition:
-        return '✦ Excellent focus! Advancing...';
+        return isReverse ? '✦ Reverse Inversion Mastered! Advancing...' : '✦ Excellent focus! Advancing...';
       case GameState.errorTransition:
         return 'Focus shifted. Replaying the pattern...';
     }
@@ -1214,11 +1257,14 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       translateY = -4.0;
     }
 
+    final bool isReverse = _isReverseLevel(_level);
+    final Color activeGlowColor = isReverse ? const Color(0xFFC084FC) : theme.tileActiveGlow;
+
     Color tileColor = theme.tileDefault;
     if (isSuccess) {
       tileColor = theme.successColor.withValues(alpha: 0.18);
     } else if (isFlashing) {
-      tileColor = theme.tileActiveGlow.withValues(alpha: 0.85);
+      tileColor = activeGlowColor.withValues(alpha: 0.85);
     } else if (isErrorFlash) {
       tileColor = const Color(0xFFEF4444).withValues(alpha: 0.75);
     } else if (isHovered && !inputLock) {
@@ -1234,7 +1280,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       );
     } else if (isFlashing) {
       glowShadow = BoxShadow(
-        color: theme.tileActiveGlow.withValues(alpha: 0.85),
+        color: activeGlowColor.withValues(alpha: 0.85),
         blurRadius: 22,
         spreadRadius: 3,
       );
@@ -1883,6 +1929,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Pause Overlay ────────────────────────────────────────────────────────
   Widget _buildPauseOverlay(GameTheme theme) {
+    if (_showReverseAnnouncementOverlay && _gameState == GameState.playback) {
+      return _buildReverseModeAnnouncementOverlay(theme);
+    }
+
     return Positioned.fill(
       child: AnimatedOpacity(
         opacity: _gameState == GameState.paused ? 1.0 : 0.0,
@@ -1918,6 +1968,135 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                           color: theme.textPrimary.withValues(alpha: 0.5)),
                     ),
                   ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildReverseRoundBanner(GameTheme theme) {
+    if (!_isReverseLevel(_level) || _gameState == GameState.startScreen || _gameState == GameState.paused) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF8B5CF6).withValues(alpha: 0.90),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFC084FC).withValues(alpha: 0.7), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF8B5CF6).withValues(alpha: 0.45),
+            blurRadius: 16,
+            spreadRadius: 1,
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text('🔄', style: TextStyle(fontSize: 16)),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Reverse Round!',
+                style: GoogleFonts.orbitron(
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                ),
+              ),
+              Text(
+                'Tap the pattern backwards — last tile first!',
+                style: GoogleFonts.spaceGrotesk(
+                  fontSize: 9,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white.withValues(alpha: 0.90),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReverseModeAnnouncementOverlay(GameTheme theme) {
+    if (!_showReverseAnnouncementOverlay || _gameState != GameState.playback) {
+      return const SizedBox.shrink();
+    }
+
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 250),
+          opacity: _showReverseAnnouncementOverlay ? 1.0 : 0.0,
+          child: Container(
+            color: Colors.black.withValues(alpha: 0.50),
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 28.0),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 22),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF8B5CF6).withValues(alpha: 0.95),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: const Color(0xFFC084FC), width: 2.0),
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFFC084FC).withValues(alpha: 0.80),
+                        blurRadius: 32,
+                        spreadRadius: 4,
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Colors.white.withValues(alpha: 0.20),
+                        ),
+                        child: const Text('🔄', style: TextStyle(fontSize: 36)),
+                      ),
+                      const SizedBox(height: 14),
+                      Text(
+                        'REVERSE MODE!',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.orbitron(
+                          fontSize: 22,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 2.5,
+                          color: Colors.white,
+                          shadows: const [
+                            Shadow(color: Colors.black45, blurRadius: 12),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Tap the pattern in reverse order — last tile first!',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.spaceGrotesk(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          height: 1.3,
+                          color: Colors.white.withValues(alpha: 0.95),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -1968,9 +2147,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   // ── Main Build ────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    final theme = _themes[_selectedThemeIndex];
     final isStart = _gameState == GameState.startScreen;
     final isGameActive = !isStart;
+    final theme = (isGameActive && _isReverseLevel(_level))
+        ? reverseTheme
+        : _themes[_selectedThemeIndex];
     final screenWidth = MediaQuery.of(context).size.width;
     final horizontalPadding = screenWidth < 360 ? 10.0 : 18.0;
 
@@ -2192,6 +2373,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                   ),
                                 ),
                               ),
+
+                              // ── Reverse Challenge Round Banner ─────────────
+                              if (!isStart) _buildReverseRoundBanner(theme),
 
                               // ── Input Timer Bar ──────────────────────────
                               _buildInputTimerBar(theme),
@@ -4463,148 +4647,39 @@ class _CompanySplashScreenState extends State<_CompanySplashScreen>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedGradientBackground(
-      colors: widget.theme.bgGradient,
-      child: Scaffold(
-        backgroundColor: Colors.transparent,
-        body: FadeTransition(
-          opacity: _fadeAnimation,
-          child: SafeArea(
-            child: Stack(
-              children: [
-                // Ambient center radial glow
-                Center(
-                  child: Container(
-                    width: 320,
-                    height: 320,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: RadialGradient(
-                        colors: [
-                          widget.theme.accentColor.withValues(alpha: 0.25),
-                          widget.theme.accentColor.withValues(alpha: 0.05),
-                          Colors.transparent,
-                        ],
-                      ),
+    return Scaffold(
+      backgroundColor: const Color(0xFF030713),
+      body: FadeTransition(
+        opacity: _fadeAnimation,
+        child: Stack(
+          children: [
+            // Full-Screen ASTA Logo Artwork Background
+            Positioned.fill(
+              child: AnimatedBuilder(
+                animation: _pulseController,
+                builder: (context, child) {
+                  return Transform.scale(
+                    scale: _pulseAnimation.value,
+                    child: Image.asset(
+                      'assets/images/asta_logo.png',
+                      fit: BoxFit.cover,
+                      width: double.infinity,
+                      height: double.infinity,
+                      errorBuilder: (context, error, stackTrace) {
+                        return Image.asset(
+                          'assets/images/company_logo.png',
+                          fit: BoxFit.cover,
+                          width: double.infinity,
+                          height: double.infinity,
+                        );
+                      },
                     ),
-                  ),
-                ),
-
-                Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      // Company Logo Shield Emblem
-                      AnimatedBuilder(
-                        animation: _pulseController,
-                        builder: (context, child) {
-                          return Transform.scale(
-                            scale: _pulseAnimation.value,
-                            child: Container(
-                              width: 120,
-                              height: 120,
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(32),
-                                color: widget.theme.panelBg.withValues(alpha: 0.6),
-                                border: Border.all(
-                                  color: widget.theme.accentColor.withValues(alpha: 0.8),
-                                  width: 2.5,
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: widget.theme.accentColor.withValues(alpha: 0.5),
-                                    blurRadius: 36,
-                                    spreadRadius: 6,
-                                  ),
-                                ],
-                              ),
-                              child: Stack(
-                                alignment: Alignment.center,
-                                children: [
-                                  Transform.rotate(
-                                    angle: _rotationAnimation.value * 6.28,
-                                    child: Container(
-                                      width: 98,
-                                      height: 98,
-                                      decoration: BoxDecoration(
-                                        borderRadius: BorderRadius.circular(24),
-                                        border: Border.all(
-                                          color: widget.theme.tileActiveGlow.withValues(alpha: 0.45),
-                                          width: 1.5,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  Icon(
-                                    Icons.auto_awesome_mosaic_rounded,
-                                    size: 52,
-                                    color: widget.theme.accentColor,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-                      const SizedBox(height: 36),
-
-                      // Company Name
-                      Text(
-                        'MINDFUL MATRIX',
-                        style: GoogleFonts.orbitron(
-                          fontSize: 26,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 5.0,
-                          color: widget.theme.textPrimary,
-                          shadows: [
-                            Shadow(
-                              color: widget.theme.accentColor.withValues(alpha: 0.7),
-                              blurRadius: 24,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-
-                      // Subtitle
-                      Text(
-                        'INTERACTIVE STUDIOS',
-                        style: GoogleFonts.spaceGrotesk(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 4.0,
-                          color: widget.theme.accentColor.withValues(alpha: 0.85),
-                        ),
-                      ),
-                      const SizedBox(height: 60),
-
-                      // Footer Presenter Tag
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: widget.theme.tileDefault.withValues(alpha: 0.2),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: widget.theme.panelBorder.withValues(alpha: 0.3),
-                            width: 1,
-                          ),
-                        ),
-                        child: Text(
-                          'P R E S E N T S',
-                          style: GoogleFonts.spaceGrotesk(
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 4.5,
-                            color: widget.theme.textPrimary.withValues(alpha: 0.6),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+                  );
+                },
+              ),
             ),
-          ),
+
+          ],
         ),
       ),
     );
@@ -4705,142 +4780,64 @@ class _FullScreenSplashScreenState extends State<_FullScreenSplashScreen>
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      // Studio Branding Tag Badge
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: widget.theme.accentColor.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: widget.theme.accentColor.withValues(alpha: 0.4),
-                            width: 1,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: widget.theme.accentColor.withValues(alpha: 0.15),
-                              blurRadius: 12,
-                            ),
-                          ],
-                        ),
-                        child: Text(
-                          '✦ MINDFUL MATRIX STUDIOS ✦',
-                          style: GoogleFonts.spaceGrotesk(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 3.5,
-                            color: widget.theme.accentColor,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 32),
-
-                      // Dedicated Splash Cosmic Spark Emblem
+                      // Stage 2 Splash: Display ONLY the Game Name
                       AnimatedBuilder(
                         animation: _pulseController,
                         builder: (context, child) {
                           return Transform.scale(
                             scale: _pulseAnimation.value,
-                            child: Container(
-                              width: 110,
-                              height: 110,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: widget.theme.panelBg.withValues(alpha: 0.6),
-                                border: Border.all(
-                                  color: widget.theme.accentColor.withValues(alpha: 0.7),
-                                  width: 2,
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: widget.theme.accentColor.withValues(alpha: 0.5),
-                                    blurRadius: 28,
-                                    spreadRadius: 4,
-                                  ),
+                            child: ShaderMask(
+                              shaderCallback: (bounds) => LinearGradient(
+                                colors: [
+                                  Colors.white,
+                                  const Color(0xFF00E5FF),
+                                  widget.theme.accentColor,
                                 ],
-                              ),
-                              child: Stack(
-                                alignment: Alignment.center,
-                                children: [
-                                  // Rotating energy ring
-                                  Transform.rotate(
-                                    angle: _rotationAnimation.value * 6.28,
-                                    child: Container(
-                                      width: 92,
-                                      height: 92,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        border: Border.all(
-                                          color: widget.theme.tileActiveGlow.withValues(alpha: 0.4),
-                                          width: 1.5,
-                                        ),
-                                      ),
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                              ).createShader(bounds),
+                              child: Text(
+                                'BRAIN REBOOT',
+                                textAlign: TextAlign.center,
+                                style: GoogleFonts.orbitron(
+                                  fontSize: 42,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 6.5,
+                                  color: Colors.white,
+                                  shadows: [
+                                    Shadow(
+                                      color: const Color(0xFF00E5FF).withValues(alpha: 0.9),
+                                      blurRadius: 36,
                                     ),
-                                  ),
-                                  Icon(
-                                    Icons.auto_awesome_rounded,
-                                    size: 48,
-                                    color: widget.theme.accentColor,
-                                  ),
-                                ],
+                                    Shadow(
+                                      color: widget.theme.accentColor.withValues(alpha: 0.5),
+                                      blurRadius: 60,
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           );
                         },
                       ),
-                      const SizedBox(height: 32),
-
-                      // Gradient Shader Futuristic Orbitron Title Text
-                      ShaderMask(
-                        shaderCallback: (bounds) => LinearGradient(
-                          colors: [
-                            Colors.white,
-                            widget.theme.accentColor,
-                            widget.theme.tileActiveGlow,
-                          ],
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                        ).createShader(bounds),
-                        child: Text(
-                          'FOCUS SPARK',
-                          textAlign: TextAlign.center,
-                          style: GoogleFonts.orbitron(
-                            fontSize: 34,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 6.0,
-                            color: Colors.white,
-                            shadows: [
-                              Shadow(
-                                color: widget.theme.accentColor.withValues(alpha: 0.8),
-                                blurRadius: 28,
-                              ),
-                              Shadow(
-                                color: widget.theme.accentColor.withValues(alpha: 0.4),
-                                blurRadius: 52,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-
-                      // Subtitle Tagline Badge
+                      const SizedBox(height: 16),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
                         decoration: BoxDecoration(
                           color: widget.theme.tileDefault.withValues(alpha: 0.25),
-                          borderRadius: BorderRadius.circular(12),
+                          borderRadius: BorderRadius.circular(14),
                           border: Border.all(
-                            color: widget.theme.panelBorder.withValues(alpha: 0.3),
+                            color: widget.theme.panelBorder.withValues(alpha: 0.35),
                             width: 1,
                           ),
                         ),
                         child: Text(
-                          'ELEVATE YOUR MEMORY & FOCUS',
+                          'CLEAR BRAIN FOG & ELEVATE FOCUS',
                           style: GoogleFonts.spaceGrotesk(
-                            fontSize: 9,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 2.8,
-                            color: widget.theme.textPrimary.withValues(alpha: 0.75),
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 3.0,
+                            color: const Color(0xFF00E5FF).withValues(alpha: 0.9),
                           ),
                         ),
                       ),

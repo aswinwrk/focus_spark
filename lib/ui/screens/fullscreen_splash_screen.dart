@@ -93,134 +93,64 @@ class _FullScreenSplashScreenState extends State<FullScreenSplashScreen>
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: widget.theme.accentColor.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: widget.theme.accentColor.withValues(alpha: 0.4),
-                            width: 1,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: widget.theme.accentColor.withValues(alpha: 0.15),
-                              blurRadius: 12,
-                            ),
-                          ],
-                        ),
-                        child: Text(
-                          '✦ MINDFUL MATRIX STUDIOS ✦',
-                          style: GoogleFonts.spaceGrotesk(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 3.5,
-                            color: widget.theme.accentColor,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 32),
+                      // Stage 2 Splash: Display ONLY the Game Name
                       AnimatedBuilder(
                         animation: _pulseController,
                         builder: (context, child) {
                           return Transform.scale(
                             scale: _pulseAnimation.value,
-                            child: Container(
-                              width: 110,
-                              height: 110,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: widget.theme.panelBg.withValues(alpha: 0.6),
-                                border: Border.all(
-                                  color: widget.theme.accentColor.withValues(alpha: 0.7),
-                                  width: 2,
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: widget.theme.accentColor.withValues(alpha: 0.5),
-                                    blurRadius: 28,
-                                    spreadRadius: 4,
-                                  ),
+                            child: ShaderMask(
+                              shaderCallback: (bounds) => LinearGradient(
+                                colors: [
+                                  Colors.white,
+                                  const Color(0xFF00E5FF),
+                                  widget.theme.accentColor,
                                 ],
-                              ),
-                              child: Stack(
-                                alignment: Alignment.center,
-                                children: [
-                                  Transform.rotate(
-                                    angle: _rotationAnimation.value * 6.28,
-                                    child: Container(
-                                      width: 92,
-                                      height: 92,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        border: Border.all(
-                                          color: widget.theme.tileActiveGlow.withValues(alpha: 0.4),
-                                          width: 1.5,
-                                        ),
-                                      ),
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                              ).createShader(bounds),
+                              child: Text(
+                                'BRAIN REBOOT',
+                                textAlign: TextAlign.center,
+                                style: GoogleFonts.orbitron(
+                                  fontSize: 42,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 6.5,
+                                  color: Colors.white,
+                                  shadows: [
+                                    Shadow(
+                                      color: const Color(0xFF00E5FF).withValues(alpha: 0.9),
+                                      blurRadius: 36,
                                     ),
-                                  ),
-                                  Icon(
-                                    Icons.auto_awesome_rounded,
-                                    size: 48,
-                                    color: widget.theme.accentColor,
-                                  ),
-                                ],
+                                    Shadow(
+                                      color: widget.theme.accentColor.withValues(alpha: 0.5),
+                                      blurRadius: 60,
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           );
                         },
                       ),
-                      const SizedBox(height: 32),
-                      ShaderMask(
-                        shaderCallback: (bounds) => LinearGradient(
-                          colors: [
-                            Colors.white,
-                            widget.theme.accentColor,
-                            widget.theme.tileActiveGlow,
-                          ],
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                        ).createShader(bounds),
-                        child: Text(
-                          'FOCUS SPARK',
-                          textAlign: TextAlign.center,
-                          style: GoogleFonts.orbitron(
-                            fontSize: 34,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 6.0,
-                            color: Colors.white,
-                            shadows: [
-                              Shadow(
-                                color: widget.theme.accentColor.withValues(alpha: 0.8),
-                                blurRadius: 28,
-                              ),
-                              Shadow(
-                                color: widget.theme.accentColor.withValues(alpha: 0.4),
-                                blurRadius: 52,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: 16),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
                         decoration: BoxDecoration(
                           color: widget.theme.tileDefault.withValues(alpha: 0.25),
-                          borderRadius: BorderRadius.circular(12),
+                          borderRadius: BorderRadius.circular(14),
                           border: Border.all(
-                            color: widget.theme.panelBorder.withValues(alpha: 0.3),
+                            color: widget.theme.panelBorder.withValues(alpha: 0.35),
                             width: 1,
                           ),
                         ),
                         child: Text(
-                          'ELEVATE YOUR MEMORY & FOCUS',
+                          'CLEAR BRAIN FOG & ELEVATE FOCUS',
                           style: GoogleFonts.spaceGrotesk(
-                            fontSize: 9,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 2.8,
-                            color: widget.theme.textPrimary.withValues(alpha: 0.75),
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 3.0,
+                            color: const Color(0xFF00E5FF).withValues(alpha: 0.9),
                           ),
                         ),
                       ),

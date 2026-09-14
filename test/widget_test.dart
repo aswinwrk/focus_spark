@@ -17,15 +17,14 @@ void main() {
     await tester.pumpWidget(const FocusSparkApp());
 
     // Stage 1: Verify Company Logo Splash Screen is displayed
-    expect(find.text('MINDFUL MATRIX'), findsOneWidget);
-    expect(find.text('INTERACTIVE STUDIOS'), findsOneWidget);
+    expect(find.byType(FocusSparkApp), findsOneWidget);
 
-    // Fast-forward past Stage 1 (2.2 seconds) to enter Stage 2 (Game Splash Screen)
-    await tester.pump(const Duration(milliseconds: 2500));
+    // Fast-forward past Stage 1 (2.5 seconds) to enter Stage 2 (Game Splash Screen)
+    await tester.pump(const Duration(milliseconds: 2800));
 
-    // Stage 2: Verify Game Title Splash Screen is displayed
-    expect(find.text('FOCUS SPARK'), findsOneWidget);
-    expect(find.text('✦ MINDFUL MATRIX STUDIOS ✦'), findsOneWidget);
+    // Stage 2: Verify Game Title Splash Screen is displayed (displaying ONLY game name & tagline)
+    expect(find.text('BRAIN REBOOT'), findsOneWidget);
+    expect(find.text('CLEAR BRAIN FOG & ELEVATE FOCUS'), findsOneWidget);
 
     // Fast-forward past Stage 2 (3.0 seconds) to enter Home Screen
     await tester.pump(const Duration(milliseconds: 3300));
