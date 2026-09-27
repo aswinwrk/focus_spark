@@ -21,6 +21,12 @@ import 'ui/components/shake_widget.dart';
 import 'ui/components/hint_tile_pulse.dart';
 import 'ui/screens/company_splash_screen.dart';
 import 'ui/screens/fullscreen_splash_screen.dart';
+import 'ui/modals/leaderboard_modal.dart';
+import 'ui/modals/level_roadmap_modal.dart';
+import 'ui/modals/tutorial_modal.dart';
+import 'ui/modals/edit_player_name_modal.dart';
+import 'services/storage_service.dart';
+import 'game/game_controller.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -116,7 +122,6 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   bool _hasSeenTutorial = false;
   bool _showTutorialCard = true;
 
-  bool _isZenMode = false;
   bool _isMusicMuted = false;
   bool _isSfxMuted = false;
   bool _isHapticsMuted = false;
@@ -149,11 +154,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   Color _activePraiseColor = const Color(0xFFA78BFA);
 
   int _splashStage = 0;
-  late SharedPreferences _prefs;
+  StorageService? _storageService;
   final math.Random _random = math.Random();
   BannerAd? _bannerAd;
   bool _isBannerAdLoaded = false;
   String _activeAdType = 'REWARDED VIDEO TEST AD';
+  final ValueNotifier<double> _timerNotifier = ValueNotifier<double>(1.0);
 
   late AnimationController _tutorialHandController;
   bool _isVisualTutorialActive = false;
@@ -192,17 +198,15 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       if (!mounted) return;
       AudioService.instance.stopAmbientMusic();
       _cancelInputTimer();
-      if (_gameState == GameState.playerInput) {
-        setState(() {
-          _gameState = GameState.paused;
-        });
-      }
     };
 
     AdService.instance.onAdClosed = () {
       if (!mounted) return;
       if (!_isMusicMuted) {
         AudioService.instance.startAmbientMusic();
+      }
+      if (_gameState == GameState.playerInput) {
+        _startInputTimer();
       }
     };
   }
@@ -232,6 +236,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     WidgetsBinding.instance.removeObserver(this);
     _praiseController.dispose();
     _tutorialHandController.dispose();
+    _timerNotifier.dispose();
     _bannerAd?.dispose();
     _particleManager.disposeTicker();
     _particleManager.dispose();
@@ -262,11 +267,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Persistence ─────────────────────────────────────────────────────────
   Future<void> _loadSettings() async {
-    _prefs = await SharedPreferences.getInstance();
-    final bool hasSavedGame = _prefs.getBool('focus_spark_has_active_game') ?? false;
-    final int savedLevel = _prefs.getInt('focus_spark_current_level') ?? 1;
-    final int savedStreak = _prefs.getInt('focus_spark_current_streak') ?? 0;
-    final String seqStr = _prefs.getString('focus_spark_current_sequence') ?? '';
+    _storageService = await StorageService.init();
+    final bool hasSavedGame = _storageService!.hasActiveGame();
+    final int savedLevel = _storageService!.getCurrentLevel();
+    final int savedStreak = _storageService!.getCurrentStreak();
+    final String seqStr = _storageService!.getCurrentSequenceStr();
 
     List<int> loadedSequence = [];
     if (hasSavedGame && seqStr.isNotEmpty) {
@@ -282,14 +287,13 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
 
     setState(() {
-      _highScore = _prefs.getInt('focus_spark_high_score') ?? 0;
-      _isZenMode = _prefs.getBool('focus_spark_zen_mode') ?? false;
-      _isMusicMuted = _prefs.getBool('focus_spark_is_music_muted') ?? false;
-      _isSfxMuted = _prefs.getBool('focus_spark_is_sfx_muted') ?? false;
-      _isHapticsMuted = _prefs.getBool('focus_spark_is_haptics_muted') ?? false;
-      _playerName = _prefs.getString('focus_spark_player_name') ?? 'You';
-      _selectedThemeIndex = _prefs.getInt('focus_spark_theme_index') ?? 0;
-      _hasSeenTutorial = _prefs.getBool('focus_spark_has_seen_tutorial') ?? false;
+      _highScore = _storageService!.getHighScore();
+      _isMusicMuted = _storageService!.isMusicMuted();
+      _isSfxMuted = _storageService!.isSfxMuted();
+      _isHapticsMuted = _storageService!.isHapticsMuted();
+      _playerName = _storageService!.getPlayerName();
+      _selectedThemeIndex = _storageService!.getThemeIndex();
+      _hasSeenTutorial = _storageService!.hasSeenTutorial();
       _showTutorialCard = !_hasSeenTutorial;
       if (!_hasSeenTutorial) {
         _isVisualTutorialActive = true;
@@ -308,9 +312,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _sequence.clear();
       }
 
-      if (_level > _highScore) {
-        _highScore = _level;
-        _prefs.setInt('focus_spark_high_score', _highScore);
+      final completedSavedLevel = _level - 1;
+      if (completedSavedLevel > _highScore) {
+        _highScore = completedSavedLevel;
+        _storageService!.setHighScore(_highScore);
       }
 
       if (!_isMusicMuted) {
@@ -320,7 +325,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       }
 
       // Load Hall of Fame Leaderboard
-      final String leaderboardStr = _prefs.getString('focus_spark_hall_of_fame') ?? '';
+      final String leaderboardStr = _storageService!.getHallOfFameJson();
       List<LeaderboardEntry> loadedLeaderboard = [];
       if (leaderboardStr.isNotEmpty) {
         try {
@@ -350,10 +355,13 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   Future<void> _saveGameProgress() async {
     if (!mounted) return;
-    await _prefs.setBool('focus_spark_has_active_game', true);
-    await _prefs.setInt('focus_spark_current_level', _level);
-    await _prefs.setInt('focus_spark_current_streak', _currentStreak);
-    await _prefs.setString('focus_spark_current_sequence', _sequence.join(','));
+    if (_storageService != null) {
+      await _storageService!.saveActiveGame(
+        level: _level,
+        streak: _currentStreak,
+        sequence: _sequence,
+      );
+    }
     if (!_hasSavedSession) {
       setState(() {
         _hasSavedSession = true;
@@ -363,49 +371,33 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   Future<void> _updateHighScore(int score) async {
     setState(() => _highScore = score);
-    await _prefs.setInt('focus_spark_high_score', score);
+    if (_storageService != null) {
+      await _storageService!.setHighScore(score);
+    }
   }
 
   List<LeaderboardEntry> _deduplicateLeaderboardEntries(List<LeaderboardEntry> entries) {
     final Map<String, LeaderboardEntry> bestEntries = {};
     for (final entry in entries) {
       final existing = bestEntries[entry.playerName];
-      if (existing == null) {
+      if (existing == null || entry.level > existing.level) {
         bestEntries[entry.playerName] = entry;
-      } else {
-        if (entry.level > existing.level || (entry.level == existing.level && entry.streak > existing.streak)) {
-          bestEntries[entry.playerName] = entry;
-        }
       }
     }
-    final List<LeaderboardEntry> result = bestEntries.values.toList();
-    result.sort((a, b) {
-      int cmp = b.level.compareTo(a.level);
-      if (cmp == 0) return b.streak.compareTo(a.streak);
-      return cmp;
-    });
-    return result;
+    final sorted = bestEntries.values.toList()
+      ..sort((a, b) => b.level.compareTo(a.level));
+    return sorted;
   }
 
   Future<void> _recordLeaderboardScore(int level, int streak) async {
-    if (level <= 1 && streak <= 0) return;
-
-    final existingIdx = _leaderboard.indexWhere((e) => e.playerName == _playerName || e.playerName == 'You');
-    if (existingIdx != -1) {
-      final existing = _leaderboard[existingIdx];
-      if (level > existing.level || (level == existing.level && streak > existing.streak)) {
-        _leaderboard[existingIdx] = LeaderboardEntry(
+    final existingIndex = _leaderboard.indexWhere((e) => e.playerName == _playerName);
+    if (existingIndex != -1) {
+      if (level > _leaderboard[existingIndex].level) {
+        _leaderboard[existingIndex] = LeaderboardEntry(
           playerName: _playerName,
           level: level,
           streak: streak,
           date: DateTime.now(),
-        );
-      } else {
-        _leaderboard[existingIdx] = LeaderboardEntry(
-          playerName: _playerName,
-          level: existing.level,
-          streak: existing.streak,
-          date: existing.date,
         );
       }
     } else {
@@ -424,7 +416,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
 
     final String jsonStr = jsonEncode(_leaderboard.map((e) => e.toJson()).toList());
-    await _prefs.setString('focus_spark_hall_of_fame', jsonStr);
+    await _storageService?.setHallOfFameJson(jsonStr);
     if (mounted) setState(() {});
   }
 
@@ -527,17 +519,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     return 'TRY AGAIN! 🔄';
   }
 
-  Future<void> _toggleZenMode() async {
-    setState(() => _isZenMode = !_isZenMode);
-    await _prefs.setBool('focus_spark_zen_mode', _isZenMode);
-  }
-
   Future<void> _toggleMusic() async {
     HapticFeedback.selectionClick();
     setState(() {
       _isMusicMuted = !_isMusicMuted;
     });
-    await _prefs.setBool('focus_spark_is_music_muted', _isMusicMuted);
+    await _storageService?.setMusicMuted(_isMusicMuted);
     if (_isMusicMuted) {
       AudioService.instance.stopAmbientMusic();
     } else {
@@ -550,7 +537,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     setState(() {
       _isSfxMuted = !_isSfxMuted;
     });
-    await _prefs.setBool('focus_spark_is_sfx_muted', _isSfxMuted);
+    await _storageService?.setSfxMuted(_isSfxMuted);
   }
 
   void _toggleHaptics() async {
@@ -560,12 +547,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     setState(() {
       _isHapticsMuted = !_isHapticsMuted;
     });
-    await _prefs.setBool('focus_spark_is_haptics_muted', _isHapticsMuted);
+    await _storageService?.setHapticsMuted(_isHapticsMuted);
   }
 
   Future<void> _selectTheme(int index) async {
     setState(() => _selectedThemeIndex = index);
-    await _prefs.setInt('focus_spark_theme_index', index);
+    await _storageService?.setThemeIndex(index);
   }
 
   // ── Particle helpers ─────────────────────────────────────────────────────
@@ -608,7 +595,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _hasSeenTutorial = true;
       _showTutorialCard = false;
     });
-    _prefs.setBool('focus_spark_has_seen_tutorial', true);
+    _storageService?.setSeenTutorial(true);
     _startSession();
   }
 
@@ -626,7 +613,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         if (!_hasSeenTutorial) {
           _hasSeenTutorial = true;
           _showTutorialCard = false;
-          _prefs.setBool('focus_spark_has_seen_tutorial', true);
+          _storageService?.setSeenTutorial(true);
         }
         _gameState = GameState.playback;
         _sequence.clear();
@@ -671,7 +658,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       if (!_hasSeenTutorial) {
         _hasSeenTutorial = true;
         _showTutorialCard = false;
-        _prefs.setBool('focus_spark_has_seen_tutorial', true);
+        _storageService?.setSeenTutorial(true);
       }
       _gameState = GameState.playback;
       _playerInput.clear();
@@ -764,31 +751,30 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void _startInputTimer() {
     _cancelInputTimer();
     if (_isVisualTutorialActive && _level <= 2) {
-      setState(() {
-        _inputTimerPercentage = 1.0;
-      });
+      _inputTimerPercentage = 1.0;
+      _timerNotifier.value = 1.0;
       return;
     }
     _totalInputTime = 6.0 + (_sequence.length * 1.2);
     _elapsedInputTime = 0.0;
     _inputTimerPercentage = 1.0;
+    _timerNotifier.value = 1.0;
 
     _inputTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
       if (_gameState != GameState.playerInput) {
         _cancelInputTimer();
         return;
       }
-      setState(() {
-        _elapsedInputTime += 0.05;
-        _inputTimerPercentage =
-            (1.0 - (_elapsedInputTime / _totalInputTime)).clamp(0.0, 1.0);
-      });
+      _elapsedInputTime += 0.05;
+      final pct = (1.0 - (_elapsedInputTime / _totalInputTime)).clamp(0.0, 1.0);
+      _inputTimerPercentage = pct;
+      _timerNotifier.value = pct;
+
       if (_elapsedInputTime >= _totalInputTime) {
         _cancelInputTimer();
         _handleTimeout();
       } else {
         // Heartbeat haptic pulse during critical time (< 20%)
-        final pct = _inputTimerPercentage.clamp(0.0, 1.0);
         if (pct <= 0.20 && (timer.tick % 10 == 0)) {
           _triggerHaptic(HapticType.heartbeat);
         }
@@ -846,7 +832,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   // ── Hint & Direct Rewarded Ad System ────────────────────────────────────
   void _triggerHint() {
     if (_gameState != GameState.playerInput || _playerInput.length >= _sequence.length) return;
-    final nextTile = _sequence[_playerInput.length];
+
+    final bool isReverse = _isReverseLevel(_level);
+    final nextTile = isReverse
+        ? _sequence[_sequence.length - 1 - _playerInput.length]
+        : _sequence[_playerInput.length];
     final theme = _themes[_selectedThemeIndex];
 
     _spawnTileSparks(nextTile, theme.tileActiveGlow);
@@ -899,7 +889,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     final shown = await AdService.instance.showRewardedAdOrLoad(
       onUserEarnedReward: (reward) {
-        if (_gameState == GameState.playerInput && mounted) {
+        if (mounted) {
+          if (_gameState != GameState.playerInput) {
+            setState(() {
+              _gameState = GameState.playerInput;
+            });
+          }
           _startInputTimer();
           _triggerHint();
         }
@@ -920,12 +915,13 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     setState(() {
       _isAdActive = false;
+      if (_gameState != GameState.playerInput) {
+        _gameState = GameState.playerInput;
+      }
     });
 
-    if (_gameState == GameState.playerInput) {
-      _startInputTimer();
-      _triggerHint();
-    }
+    _startInputTimer();
+    _triggerHint();
   }
 
   Widget _buildDirectAdOverlay(GameTheme theme) {
@@ -1144,15 +1140,15 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           _freeHintsRemainingInLevel = 1;
           if (_level > _sessionMaxLevel) _sessionMaxLevel = _level;
           if (_currentStreak > _sessionMaxStreak) _sessionMaxStreak = _currentStreak;
-          if (_level > _highScore) {
-            _highScore = _level;
-            _prefs.setInt('focus_spark_high_score', _highScore);
+          if (completedLevel > _highScore) {
+            _highScore = completedLevel;
+            _storageService?.setHighScore(_highScore);
           }
 
           if (_isVisualTutorialActive && _level > 2) {
             _isVisualTutorialActive = false;
             _hasSeenTutorial = true;
-            _prefs.setBool('focus_spark_has_seen_tutorial', true);
+            _storageService?.setSeenTutorial(true);
           }
         });
         _recordLeaderboardScore(completedLevel, _currentStreak);
@@ -1407,8 +1403,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     if (_isVisualTutorialActive && _level <= 2) {
       return const SizedBox(height: 0, width: double.infinity);
     }
-    final remainingSecs = math.max(0.0, _totalInputTime - _elapsedInputTime);
-    final pct = _inputTimerPercentage.clamp(0.0, 1.0);
+    return ValueListenableBuilder<double>(
+      valueListenable: _timerNotifier,
+      builder: (context, pctVal, _) {
+        final remainingSecs = math.max(0.0, _totalInputTime - _elapsedInputTime);
+        final pct = pctVal.clamp(0.0, 1.0);
 
     final Color barColor;
     final Color glowColor;
@@ -1557,6 +1556,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         ),
       ),
     );
+  },
+);
   }
 
   // ── HUD Item ─────────────────────────────────────────────────────────────
@@ -1939,39 +1940,219 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         duration: const Duration(milliseconds: 300),
         child: IgnorePointer(
           ignoring: _gameState != GameState.paused,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(20),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-              child: Container(
-                color: Colors.black.withValues(alpha: 0.45),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.pause_circle_outline_rounded,
-                        size: 52, color: theme.accentColor.withValues(alpha: 0.85)),
-                    const SizedBox(height: 12),
-                    Text(
-                      'PAUSED',
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 4,
-                        color: theme.textPrimary,
+          child: GestureDetector(
+            onTap: _togglePause,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.65),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: theme.accentColor.withValues(alpha: 0.40),
+                      width: 1.5,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: theme.accentColor.withValues(alpha: 0.20),
+                        blurRadius: 24,
+                        spreadRadius: 2,
+                      ),
+                    ],
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  child: Center(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // Glowing Pulsing Pause Icon Badge
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: theme.accentColor.withValues(alpha: 0.15),
+                              border: Border.all(color: theme.accentColor, width: 1.8),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: theme.accentColor.withValues(alpha: 0.35),
+                                  blurRadius: 16,
+                                  spreadRadius: 1,
+                                ),
+                              ],
+                            ),
+                            child: Icon(
+                              Icons.pause_rounded,
+                              size: 30,
+                              color: theme.accentColor,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+
+                          // Header with Orbitron & Gradient Mask
+                          ShaderMask(
+                            shaderCallback: (bounds) => LinearGradient(
+                              colors: [
+                                Colors.white,
+                                theme.accentColor,
+                              ],
+                            ).createShader(bounds),
+                            child: Text(
+                              'SESSION PAUSED',
+                              style: GoogleFonts.orbitron(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 2.0,
+                                color: Colors.white,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Take a deep breath • Tap to resume',
+                            style: GoogleFonts.spaceGrotesk(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w500,
+                              color: theme.textPrimary.withValues(alpha: 0.65),
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+
+                          const SizedBox(height: 12),
+
+                          // Session Stats HUD Snapshot
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.35),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: theme.panelBorder.withValues(alpha: 0.4),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceAround,
+                              children: [
+                                _buildHUDItem('LEVEL', 'LVL $_level', theme,
+                                    valueColor: theme.accentColor, fontSize: 11.0),
+                                Container(height: 18, width: 1, color: theme.panelBorder.withValues(alpha: 0.3)),
+                                _buildHUDItem('STREAK', '$_currentStreak 🔥', theme, fontSize: 11.0),
+                                Container(height: 18, width: 1, color: theme.panelBorder.withValues(alpha: 0.3)),
+                                _buildHUDItem('BEST', 'LVL $_highScore', theme, fontSize: 11.0),
+                              ],
+                            ),
+                          ),
+
+                          const SizedBox(height: 14),
+
+                          // Primary Action Button: RESUME SESSION
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton.icon(
+                              onPressed: _togglePause,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: theme.accentColor,
+                                foregroundColor: Colors.black87,
+                                elevation: 6,
+                                shadowColor: theme.accentColor.withValues(alpha: 0.4),
+                                padding: const EdgeInsets.symmetric(vertical: 10),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                              label: Text(
+                                'RESUME SESSION',
+                                style: GoogleFonts.orbitron(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 1.2,
+                                ),
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(height: 10),
+
+                          // Quick Audio Settings Bar
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              _buildPauseQuickToggle(
+                                icon: _isMusicMuted ? Icons.music_off_rounded : Icons.music_note_rounded,
+                                label: 'MUSIC',
+                                isActive: !_isMusicMuted,
+                                onTap: _toggleMusic,
+                                theme: theme,
+                              ),
+                              _buildPauseQuickToggle(
+                                icon: _isSfxMuted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
+                                label: 'SFX',
+                                isActive: !_isSfxMuted,
+                                onTap: _toggleSfx,
+                                theme: theme,
+                              ),
+                              _buildPauseQuickToggle(
+                                icon: _isHapticsMuted ? Icons.vibration_rounded : Icons.vibration_rounded,
+                                label: 'HAPTICS',
+                                isActive: !_isHapticsMuted,
+                                onTap: _toggleHaptics,
+                                theme: theme,
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(height: 6),
-                    Text(
-                      'Take a moment to breathe.',
-                      style: TextStyle(
-                          fontSize: 13,
-                          color: theme.textPrimary.withValues(alpha: 0.5)),
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPauseQuickToggle({
+    required IconData icon,
+    required String label,
+    required bool isActive,
+    required VoidCallback onTap,
+    required GameTheme theme,
+  }) {
+    final color = isActive ? theme.accentColor : theme.textPrimary.withValues(alpha: 0.35);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: isActive ? theme.accentColor.withValues(alpha: 0.15) : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: isActive ? theme.accentColor.withValues(alpha: 0.4) : theme.panelBorder.withValues(alpha: 0.3),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 12, color: color),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: GoogleFonts.spaceGrotesk(
+                fontSize: 9.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.8,
+                color: color,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -2270,24 +2451,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                           _buildIconToggle(
                             icon: Icons.help_outline_rounded,
                             isActive: false,
-                            onTap: () => _showInstructionsModal(context, theme),
+                            onTap: () => _showTutorialModal(context, theme),
                             theme: theme,
                             tooltip: 'How to Play',
                           ),
                           const SizedBox(width: 4),
                         ],
-
-                        // 4. Zen Mode Button
-                        _buildIconToggle(
-                          icon: _isZenMode ? Icons.spa : Icons.spa_outlined,
-                          isActive: _isZenMode,
-                          onTap: _toggleZenMode,
-                          theme: theme,
-                          tooltip: _isZenMode
-                              ? 'Disable Zen Mode'
-                              : 'Enable Zen Mode',
-                        ),
-                        const SizedBox(width: 4),
 
                         // 5. Theme Dots (Cosmic Indigo, Sage Calm, Midnight Cyber)
                         Row(
@@ -2353,7 +2522,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                               // ── HUD ─────────────────────────────────────
                               AnimatedCrossFade(
                                 duration: const Duration(milliseconds: 280),
-                                crossFadeState: _isZenMode || isStart
+                                crossFadeState: isStart
                                     ? CrossFadeState.showFirst
                                     : CrossFadeState.showSecond,
                                 firstChild: const SizedBox(height: 0, width: double.infinity),
@@ -2919,7 +3088,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                       Expanded(
                         child: _buildHUDItem(
                             'BEST SCORE',
-                            'LVL ${math.max(_level, _highScore)}',
+                            'LVL $_highScore',
                             theme,
                             fontSize: 14.0),
                       ),
@@ -3003,811 +3172,74 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     );
   }
 
-  // ── Instructions Modal ────────────────────────────────────────────────
-  void _showInstructionsModal(BuildContext context, GameTheme theme) {
+  // ── Modular Modal Dialog Delegates ───────────────────────────────────────
+  void _showTutorialModal(BuildContext context, GameTheme theme) {
     HapticFeedback.selectionClick();
-    showDialog(
-      context: context,
-      barrierDismissible: true,
-      barrierColor: Colors.black.withValues(alpha: 0.75),
-      builder: (context) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 420),
-            decoration: BoxDecoration(
-              color: theme.panelBg,
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: theme.panelBorder, width: 1.5),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.5),
-                  blurRadius: 32,
-                  offset: const Offset(0, 12),
-                ),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(24),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
-                child: Padding(
-                  padding: const EdgeInsets.all(22.0),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(Icons.help_outline_rounded,
-                                  color: theme.accentColor, size: 24),
-                              const SizedBox(width: 8),
-                              Text(
-                                'HOW TO PLAY',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                  letterSpacing: 2.0,
-                                  color: theme.textPrimary,
-                                ),
-                              ),
-                            ],
-                          ),
-                          IconButton(
-                            onPressed: () => Navigator.of(context).pop(),
-                            icon: Icon(Icons.close_rounded,
-                                color: theme.textPrimary.withValues(alpha: 0.6)),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      const Divider(height: 1, color: Colors.white12),
-                      const SizedBox(height: 16),
-                      _buildInstruction('✦', 'Watch the tiles flash in sequence', theme),
-                      _buildInstruction('✦', 'Replicate the pattern by tapping', theme),
-                      _buildInstruction('✦', 'Each round adds one more step', theme),
-                      _buildInstruction('✦', '1 Free Hint per level + Direct Rewarded Ad', theme),
-                      _buildInstruction('✦', 'No punishment — just keep going & stay focused!', theme),
-                      const SizedBox(height: 20),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.of(context).pop();
-                            _startVisualTutorial();
-                          },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: theme.accentColor,
-                            foregroundColor: Colors.black87,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                          ),
-                          icon: const Icon(Icons.touch_app_rounded, size: 18),
-                          label: Text(
-                            'START VISUAL DEMO 👆',
-                            style: GoogleFonts.orbitron(
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 1.1,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      SizedBox(
-                        width: double.infinity,
-                        child: TextButton(
-                          onPressed: () => Navigator.of(context).pop(),
-                          child: const Text('GOT IT!'),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        );
-      },
+    TutorialModal.show(
+      context,
+      theme: theme,
     );
   }
 
-  // ── Level Roadmap Modal ────────────────────────────────────────────────
   void _showLevelRoadmapModal(BuildContext context, GameTheme theme, {VoidCallback? onDismiss}) {
     HapticFeedback.selectionClick();
-    final effectiveBest = math.max(_level, _highScore);
-    final maxTargetLevel = math.max(effectiveBest + 8, 25);
-    final ScrollController scrollController = ScrollController();
-
-    // Auto-scroll to center current level after frame render
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (scrollController.hasClients) {
-        final targetOffset = (_level - 1) * 70.0;
-        scrollController.animateTo(
-          targetOffset.clamp(0.0, scrollController.position.maxScrollExtent),
-          duration: const Duration(milliseconds: 600),
-          curve: Curves.easeOutCubic,
-        );
+    LevelRoadmapModal.show(
+      context,
+      theme: theme,
+      currentLevel: _level,
+      highScoreLevel: _highScore,
+    ).then((_) {
+      if (mounted) {
+        onDismiss?.call();
       }
     });
-
-    showDialog(
-      context: context,
-      barrierDismissible: true,
-      barrierColor: Colors.black.withValues(alpha: 0.75),
-      builder: (context) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 420, maxHeight: 600),
-            decoration: BoxDecoration(
-              color: theme.panelBg,
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: theme.panelBorder, width: 1.5),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.5),
-                  blurRadius: 32,
-                  offset: const Offset(0, 12),
-                ),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(24),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
-                child: Padding(
-                  padding: const EdgeInsets.all(20.0),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Header
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(Icons.map_rounded,
-                                  color: theme.accentColor, size: 24),
-                              const SizedBox(width: 8),
-                              Text(
-                                'LEVEL ROADMAP',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                  letterSpacing: 2.0,
-                                  color: theme.textPrimary,
-                                ),
-                              ),
-                            ],
-                          ),
-                          IconButton(
-                            onPressed: () => Navigator.of(context).pop(),
-                            icon: Icon(Icons.close_rounded,
-                                color: theme.textPrimary.withValues(alpha: 0.6)),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      // Subheader Telemetry
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: theme.accentColor.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: theme.accentColor.withValues(alpha: 0.3)),
-                        ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceAround,
-                          children: [
-                            Text(
-                              'CURRENT: LVL $_level',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                                color: theme.accentColor,
-                              ),
-                            ),
-                            Text('•', style: TextStyle(color: theme.textPrimary.withValues(alpha: 0.3))),
-                            Text(
-                              'BEST: LVL $effectiveBest',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                                color: theme.textPrimary.withValues(alpha: 0.8),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 14),
-                      const Divider(height: 1, color: Colors.white12),
-                      const SizedBox(height: 14),
-
-                      // Winding Level Path
-                      Expanded(
-                        child: ListView.builder(
-                          controller: scrollController,
-                          itemCount: maxTargetLevel,
-                          itemBuilder: (context, index) {
-                            final lvl = index + 1;
-                            final isCurrent = lvl == _level;
-                            final isBestPeak = lvl == _highScore && _highScore > 0;
-                            final isPassed = (lvl < _level) || (lvl <= _highScore && !isCurrent && !isBestPeak);
-
-                            // Winding S-curve normalized alignment ratio (-0.50 to +0.50)
-                            final double alignX = math.sin(lvl * 0.65) * 0.50;
-                            final double nextAlignX = math.sin((lvl + 1) * 0.65) * 0.50;
-
-                            // Milestone titles at level 5, 10, 15, 20, 25, 30
-                            String? milestoneTitle;
-                            if (lvl == 5) milestoneTitle = '🌟 Spark Initiate';
-                            if (lvl == 10) milestoneTitle = '⚡ Focus Adept';
-                            if (lvl == 15) milestoneTitle = '🧘 Mindful Master';
-                            if (lvl == 20) milestoneTitle = '🔮 Zen Transcendent';
-                            if (lvl == 25) milestoneTitle = '🌌 Cosmic Sage';
-                            if (lvl == 30) milestoneTitle = '👑 Memory Legend';
-
-                            Widget nodeWidget = AnimatedContainer(
-                              duration: const Duration(milliseconds: 300),
-                              width: isCurrent ? 50 : 42,
-                              height: isCurrent ? 50 : 42,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: isCurrent
-                                    ? theme.accentColor
-                                    : isPassed || isBestPeak
-                                        ? theme.accentColor.withValues(alpha: 0.25)
-                                        : theme.tileDefault.withValues(alpha: 0.35),
-                                border: Border.all(
-                                  color: isCurrent
-                                      ? Colors.white
-                                      : isPassed || isBestPeak
-                                          ? theme.accentColor.withValues(alpha: 0.75)
-                                          : theme.panelBorder.withValues(alpha: 0.4),
-                                  width: isCurrent ? 2.5 : 1.5,
-                                ),
-                                boxShadow: isCurrent
-                                    ? [
-                                        BoxShadow(
-                                          color: theme.accentColor.withValues(alpha: 0.65),
-                                          blurRadius: 18,
-                                          spreadRadius: 3,
-                                        ),
-                                      ]
-                                    : isPassed || isBestPeak
-                                        ? [
-                                            BoxShadow(
-                                              color: theme.accentColor.withValues(alpha: 0.25),
-                                              blurRadius: 8,
-                                            ),
-                                          ]
-                                        : null,
-                              ),
-                              child: Center(
-                                child: isCurrent
-                                    ? const Icon(
-                                        Icons.local_fire_department_rounded,
-                                        color: Colors.black87,
-                                        size: 24,
-                                      )
-                                    : isPassed || isBestPeak
-                                        ? Icon(
-                                            Icons.check_rounded,
-                                            color: theme.accentColor,
-                                            size: 18,
-                                          )
-                                        : Text(
-                                            '$lvl',
-                                            style: TextStyle(
-                                              fontSize: 12,
-                                              fontWeight: FontWeight.bold,
-                                              color: theme.textPrimary
-                                                  .withValues(alpha: 0.45),
-                                            ),
-                                          ),
-                              ),
-                            );
-
-                            if (isBestPeak && !isCurrent) {
-                              nodeWidget = _PulsingBestPeakNode(child: nodeWidget);
-                            }
-
-                            return Column(
-                              children: [
-                                if (milestoneTitle != null) ...[
-                                  Container(
-                                    margin: const EdgeInsets.symmetric(vertical: 8),
-                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
-                                    decoration: BoxDecoration(
-                                      color: isPassed || isCurrent || isBestPeak
-                                          ? const Color(0xFFFFD700).withValues(alpha: 0.15)
-                                          : theme.tileDefault.withValues(alpha: 0.2),
-                                      borderRadius: BorderRadius.circular(20),
-                                      border: Border.all(
-                                        color: isPassed || isCurrent || isBestPeak
-                                            ? const Color(0xFFFFD700).withValues(alpha: 0.5)
-                                            : theme.panelBorder.withValues(alpha: 0.3),
-                                      ),
-                                    ),
-                                    child: Text(
-                                      milestoneTitle,
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.bold,
-                                        letterSpacing: 1.2,
-                                        color: isPassed || isCurrent || isBestPeak
-                                            ? const Color(0xFFFFD700)
-                                            : theme.textPrimary.withValues(alpha: 0.4),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                                SizedBox(
-                                  height: 70,
-                                  child: Stack(
-                                    children: [
-                                      // Seamless Bezier Curved Connecting Line
-                                      if (lvl < maxTargetLevel)
-                                        Positioned.fill(
-                                          child: CustomPaint(
-                                            painter: _RoadmapSegmentPainter(
-                                              startAlignX: alignX,
-                                              endAlignX: nextAlignX,
-                                              lineColor: isPassed || isCurrent || (lvl < _highScore)
-                                                  ? theme.accentColor.withValues(alpha: 0.65)
-                                                  : theme.panelBorder.withValues(alpha: 0.3),
-                                            ),
-                                          ),
-                                        ),
-                                      // Level Node
-                                      Align(
-                                        alignment: Alignment(alignX, 0.0),
-                                        child: nodeWidget,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            );
-                          },
-                        ),
-                      ),
-                      if (_gameState == GameState.successTransition) ...[
-                        const SizedBox(height: 12),
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton.icon(
-                            onPressed: () {
-                              Navigator.of(context).pop();
-                            },
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: theme.accentColor,
-                              foregroundColor: Colors.black87,
-                              padding: const EdgeInsets.symmetric(vertical: 14),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                            ),
-                            icon: const Icon(Icons.play_arrow_rounded, size: 20),
-                            label: Text(
-                              'CONTINUE TO LEVEL $_level',
-                              style: GoogleFonts.orbitron(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 1.2,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    ).then((_) {
-      scrollController.dispose();
-      onDismiss?.call();
-    });
   }
 
-  // ── Edit Player Name Modal ─────────────────────────────────────────────
-  void _showEditPlayerNameModal(BuildContext context, GameTheme theme) {
+  void _showEditPlayerNameModal(BuildContext context, GameTheme theme, {bool returnToLeaderboard = true}) {
     HapticFeedback.selectionClick();
-    final TextEditingController nameController = TextEditingController(text: _playerName);
-
-    showDialog(
-      context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.8),
-      builder: (dialogCtx) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 360),
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: theme.panelBg,
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: theme.accentColor.withValues(alpha: 0.5), width: 1.5),
-              boxShadow: [
-                BoxShadow(
-                  color: theme.accentColor.withValues(alpha: 0.25),
-                  blurRadius: 28,
-                ),
-              ],
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.edit_rounded, color: theme.accentColor, size: 20),
-                    const SizedBox(width: 8),
-                    Text(
-                      'EDIT GAMER TAG',
-                      style: GoogleFonts.orbitron(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 1.4,
-                        color: theme.textPrimary,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: nameController,
-                  maxLength: 14,
-                  autofocus: true,
-                  style: TextStyle(
-                    color: theme.textPrimary,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 14,
-                  ),
-                  decoration: InputDecoration(
-                    labelText: 'Player Name',
-                    labelStyle: TextStyle(color: theme.accentColor),
-                    counterStyle: TextStyle(color: theme.textPrimary.withValues(alpha: 0.5)),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(14),
-                      borderSide: BorderSide(color: theme.panelBorder),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(14),
-                      borderSide: BorderSide(color: theme.accentColor, width: 1.5),
-                    ),
-                    filled: true,
-                    fillColor: theme.tileDefault.withValues(alpha: 0.3),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton(
-                      onPressed: () => Navigator.of(dialogCtx).pop(),
-                      child: Text(
-                        'CANCEL',
-                        style: TextStyle(
-                          color: theme.textPrimary.withValues(alpha: 0.6),
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    ElevatedButton(
-                      onPressed: () async {
-                        final newName = nameController.text.trim();
-                        if (newName.isNotEmpty) {
-                          final oldName = _playerName;
-                          setState(() {
-                            _playerName = newName;
-                            for (int i = 0; i < _leaderboard.length; i++) {
-                              if (_leaderboard[i].playerName == oldName || _leaderboard[i].playerName == 'You') {
-                                _leaderboard[i] = LeaderboardEntry(
-                                  playerName: newName,
-                                  level: _leaderboard[i].level,
-                                  streak: _leaderboard[i].streak,
-                                  date: _leaderboard[i].date,
-                                );
-                              }
-                            }
-                          });
-                          await _prefs.setString('focus_spark_player_name', newName);
-                          final String jsonStr = jsonEncode(_leaderboard.map((e) => e.toJson()).toList());
-                          await _prefs.setString('focus_spark_hall_of_fame', jsonStr);
-                        }
-                        if (dialogCtx.mounted) {
-                          Navigator.of(dialogCtx).pop();
-                          _showLeaderboardModal(context, theme);
-                        }
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: theme.accentColor,
-                        foregroundColor: Colors.black87,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text(
-                        'SAVE',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    ).then((_) {
-      nameController.dispose();
-    });
-  }
-
-  // ── Leaderboard Modal ──────────────────────────────────────────────────
-  void _showLeaderboardModal(BuildContext context, GameTheme theme) {
-    HapticFeedback.selectionClick();
-    showDialog(
-      context: context,
-      barrierDismissible: true,
-      barrierColor: Colors.black.withValues(alpha: 0.75),
-      builder: (context) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 420, maxHeight: 560),
-            decoration: BoxDecoration(
-              color: theme.panelBg,
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: theme.panelBorder, width: 1.5),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.5),
-                  blurRadius: 32,
-                  offset: const Offset(0, 12),
-                ),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(24),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
-                child: Padding(
-                  padding: const EdgeInsets.all(20.0),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Modal Header
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Row(
-                            children: [
-                              const Icon(Icons.emoji_events_rounded,
-                                  color: Color(0xFFFFD700), size: 24),
-                              const SizedBox(width: 8),
-                              Text(
-                                'HALL OF FAME',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                  letterSpacing: 2.0,
-                                  color: theme.textPrimary,
-                                ),
-                              ),
-                            ],
-                          ),
-                          Row(
-                            children: [
-                              InkWell(
-                                onTap: () {
-                                  Navigator.of(context).pop();
-                                  _showEditPlayerNameModal(context, theme);
-                                },
-                                borderRadius: BorderRadius.circular(10),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: theme.accentColor.withValues(alpha: 0.15),
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: theme.accentColor.withValues(alpha: 0.4)),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(Icons.edit_rounded, size: 12, color: theme.accentColor),
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        _playerName,
-                                        style: TextStyle(
-                                          fontSize: 11,
-                                          fontWeight: FontWeight.bold,
-                                          color: theme.accentColor,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 4),
-                              IconButton(
-                                onPressed: () => Navigator.of(context).pop(),
-                                icon: Icon(Icons.close_rounded,
-                                    color: theme.textPrimary.withValues(alpha: 0.6)),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      const Divider(height: 1, color: Colors.white12),
-                      const SizedBox(height: 12),
-
-                      // Leaderboard Content List
-                      Expanded(
-                        child: _leaderboard.isEmpty
-                            ? Center(
-                                child: Text(
-                                  'No scores recorded yet.\nPlay a session to enter the Hall of Fame!',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: theme.textPrimary.withValues(alpha: 0.5),
-                                  ),
-                                ),
-                              )
-                            : ListView.separated(
-                                itemCount: _leaderboard.length,
-                                separatorBuilder: (_, __) =>
-                                    const SizedBox(height: 8),
-                                itemBuilder: (context, index) {
-                                  final entry = _leaderboard[index];
-                                  final rank = index + 1;
-                                  final isTop3 = rank <= 3;
-                                  final isCurrentUser = entry.playerName == _playerName || entry.playerName == 'You';
-
-                                  Color badgeColor = theme.accentColor;
-                                  if (rank == 1) badgeColor = const Color(0xFFFFD700);
-                                  if (rank == 2) badgeColor = const Color(0xFFC0C0C0);
-                                  if (rank == 3) badgeColor = const Color(0xFFCD7F32);
-
-                                  return Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 14, vertical: 10),
-                                    decoration: BoxDecoration(
-                                      color: isCurrentUser
-                                          ? theme.accentColor.withValues(alpha: 0.22)
-                                          : (isTop3
-                                              ? badgeColor.withValues(alpha: 0.12)
-                                              : theme.tileDefault.withValues(alpha: 0.3)),
-                                      borderRadius: BorderRadius.circular(14),
-                                      border: Border.all(
-                                        color: isCurrentUser
-                                            ? theme.accentColor
-                                            : (isTop3
-                                                ? badgeColor.withValues(alpha: 0.4)
-                                                : theme.panelBorder.withValues(alpha: 0.3)),
-                                        width: isCurrentUser ? 2.0 : 1.0,
-                                      ),
-                                      boxShadow: isCurrentUser
-                                          ? [
-                                              BoxShadow(
-                                                color: theme.accentColor.withValues(alpha: 0.35),
-                                                blurRadius: 14,
-                                                spreadRadius: 1,
-                                              ),
-                                            ]
-                                          : null,
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        // Rank Badge
-                                        Container(
-                                          width: 30,
-                                          height: 30,
-                                          decoration: BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color: badgeColor.withValues(alpha: 0.22),
-                                            border: Border.all(
-                                                color: badgeColor.withValues(alpha: 0.6),
-                                                width: 1),
-                                          ),
-                                          child: Center(
-                                            child: Text(
-                                              rank == 1
-                                                  ? '🥇'
-                                                  : rank == 2
-                                                      ? '🥈'
-                                                      : rank == 3
-                                                          ? '🥉'
-                                                          : '#$rank',
-                                              style: TextStyle(
-                                                fontSize: isTop3 ? 14 : 11,
-                                                fontWeight: FontWeight.bold,
-                                                color: isTop3
-                                                    ? badgeColor
-                                                    : theme.textPrimary
-                                                        .withValues(alpha: 0.7),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        // Name & Details
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                entry.playerName,
-                                                style: TextStyle(
-                                                  fontSize: 13,
-                                                  fontWeight: FontWeight.bold,
-                                                  color: theme.textPrimary,
-                                                ),
-                                              ),
-                                              const SizedBox(height: 2),
-                                              Text(
-                                                'Streak: ${entry.streak} • ${_formatDate(entry.date)}',
-                                                style: TextStyle(
-                                                  fontSize: 10,
-                                                  color: theme.textPrimary
-                                                      .withValues(alpha: 0.45),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                        // Level Tag
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 10, vertical: 4),
-                                          decoration: BoxDecoration(
-                                            color: badgeColor.withValues(alpha: 0.18),
-                                            borderRadius: BorderRadius.circular(10),
-                                            border: Border.all(
-                                                color: badgeColor.withValues(alpha: 0.35)),
-                                          ),
-                                          child: Text(
-                                            'LVL ${entry.level}',
-                                            style: TextStyle(
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.bold,
-                                              color: badgeColor,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                },
-                              ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        );
+    EditPlayerNameModal.show(
+      context,
+      theme: theme,
+      currentName: _playerName,
+      onSave: (newName) async {
+        final oldName = _playerName;
+        if (!mounted) return;
+        setState(() {
+          _playerName = newName;
+          for (int i = 0; i < _leaderboard.length; i++) {
+            if (_leaderboard[i].playerName == oldName || _leaderboard[i].playerName == 'You') {
+              _leaderboard[i] = LeaderboardEntry(
+                playerName: newName,
+                level: _leaderboard[i].level,
+                streak: _leaderboard[i].streak,
+                date: _leaderboard[i].date,
+              );
+            }
+          }
+        });
+        if (_storageService != null) {
+          await _storageService!.setPlayerName(newName);
+          final String jsonStr = jsonEncode(_leaderboard.map((e) => e.toJson()).toList());
+          await _storageService!.setHallOfFameJson(jsonStr);
+        }
+        if (returnToLeaderboard && mounted) {
+          _showLeaderboardModal(context, theme);
+        }
       },
     );
   }
 
-  String _formatDate(DateTime date) {
-    return '${date.day}/${date.month}/${date.year}';
+  void _showLeaderboardModal(BuildContext context, GameTheme theme) {
+    HapticFeedback.selectionClick();
+    LeaderboardModal.show(
+      context,
+      theme: theme,
+      leaderboard: _leaderboard,
+      activePlayerName: _playerName,
+      onEditGamerTag: () {
+        _showEditPlayerNameModal(context, theme);
+      },
+    );
   }
 
   Widget _buildIconToggle({
@@ -4550,380 +3982,5 @@ class ParticlePainter extends CustomPainter {
   bool shouldRepaint(covariant ParticlePainter oldDelegate) => true;
 }
 
-// ---------------------------------------------------------------------------
-// Leaderboard Data Model
-// ---------------------------------------------------------------------------
-class LeaderboardEntry {
-  final String playerName;
-  final int level;
-  final int streak;
-  final DateTime date;
 
-  LeaderboardEntry({
-    required this.playerName,
-    required this.level,
-    required this.streak,
-    required this.date,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'playerName': playerName,
-        'level': level,
-        'streak': streak,
-        'date': date.toIso8601String(),
-      };
-
-  factory LeaderboardEntry.fromJson(Map<String, dynamic> json) {
-    return LeaderboardEntry(
-      playerName: json['playerName'] as String? ?? 'Mindful Player',
-      level: json['level'] as int? ?? 1,
-      streak: json['streak'] as int? ?? 0,
-      date: json['date'] != null
-          ? DateTime.tryParse(json['date'] as String) ?? DateTime.now()
-          : DateTime.now(),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Stage 1: Full-Screen Company Logo Splash Screen
-// ---------------------------------------------------------------------------
-class _CompanySplashScreen extends StatefulWidget {
-  final GameTheme theme;
-  final VoidCallback onComplete;
-
-  const _CompanySplashScreen({
-    required this.theme,
-    required this.onComplete,
-  });
-
-  @override
-  State<_CompanySplashScreen> createState() => _CompanySplashScreenState();
-}
-
-class _CompanySplashScreenState extends State<_CompanySplashScreen>
-    with TickerProviderStateMixin {
-  late AnimationController _fadeController;
-  late Animation<double> _fadeAnimation;
-  late AnimationController _pulseController;
-  late Animation<double> _pulseAnimation;
-  late Animation<double> _rotationAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _fadeController = AnimationController(
-      duration: const Duration(milliseconds: 2000),
-      vsync: this,
-    );
-    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _fadeController, curve: Curves.easeInOut),
-    );
-
-    _pulseController = AnimationController(
-      duration: const Duration(milliseconds: 2400),
-      vsync: this,
-    )..repeat(reverse: true);
-
-    _pulseAnimation = Tween<double>(begin: 0.92, end: 1.08).animate(
-      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
-    );
-    _rotationAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(_pulseController);
-
-    _fadeController.forward();
-    Timer(const Duration(milliseconds: 2200), () {
-      if (mounted) {
-        widget.onComplete();
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _fadeController.dispose();
-    _pulseController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF030713),
-      body: FadeTransition(
-        opacity: _fadeAnimation,
-        child: Stack(
-          children: [
-            // Full-Screen ASTA Logo Artwork Background
-            Positioned.fill(
-              child: AnimatedBuilder(
-                animation: _pulseController,
-                builder: (context, child) {
-                  return Transform.scale(
-                    scale: _pulseAnimation.value,
-                    child: Image.asset(
-                      'assets/images/asta_logo.png',
-                      fit: BoxFit.cover,
-                      width: double.infinity,
-                      height: double.infinity,
-                      errorBuilder: (context, error, stackTrace) {
-                        return Image.asset(
-                          'assets/images/company_logo.png',
-                          fit: BoxFit.cover,
-                          width: double.infinity,
-                          height: double.infinity,
-                        );
-                      },
-                    ),
-                  );
-                },
-              ),
-            ),
-
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Stage 2: Full-Screen Game Launch Splash Screen with Progress Loading Bar
-// ---------------------------------------------------------------------------
-class _FullScreenSplashScreen extends StatefulWidget {
-  final GameTheme theme;
-  final VoidCallback onLoadingComplete;
-
-  const _FullScreenSplashScreen({
-    required this.theme,
-    required this.onLoadingComplete,
-  });
-
-  @override
-  State<_FullScreenSplashScreen> createState() => _FullScreenSplashScreenState();
-}
-
-class _FullScreenSplashScreenState extends State<_FullScreenSplashScreen>
-    with TickerProviderStateMixin {
-  late AnimationController _progressController;
-  late Animation<double> _progressAnimation;
-  late AnimationController _pulseController;
-  late Animation<double> _pulseAnimation;
-  late Animation<double> _rotationAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _progressController = AnimationController(
-      duration: const Duration(milliseconds: 3000),
-      vsync: this,
-    );
-    _progressAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _progressController, curve: Curves.easeInOutCubic),
-    );
-
-    _pulseController = AnimationController(
-      duration: const Duration(milliseconds: 2800),
-      vsync: this,
-    )..repeat(reverse: true);
-
-    _pulseAnimation = Tween<double>(begin: 0.90, end: 1.10).animate(
-      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
-    );
-
-    _rotationAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(_pulseController);
-
-    _progressController.forward();
-    _progressController.addStatusListener((status) {
-      if (status == AnimationStatus.completed) {
-        widget.onLoadingComplete();
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _progressController.dispose();
-    _pulseController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedGradientBackground(
-      colors: widget.theme.bgGradient,
-      child: Scaffold(
-        backgroundColor: Colors.transparent,
-        body: SafeArea(
-          child: Stack(
-            children: [
-              // Ambient background spark glow
-              Center(
-                child: Container(
-                  width: 280,
-                  height: 280,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: RadialGradient(
-                      colors: [
-                        widget.theme.accentColor.withValues(alpha: 0.22),
-                        widget.theme.accentColor.withValues(alpha: 0.05),
-                        Colors.transparent,
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-
-              Center(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24.0),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      // Stage 2 Splash: Display ONLY the Game Name
-                      AnimatedBuilder(
-                        animation: _pulseController,
-                        builder: (context, child) {
-                          return Transform.scale(
-                            scale: _pulseAnimation.value,
-                            child: ShaderMask(
-                              shaderCallback: (bounds) => LinearGradient(
-                                colors: [
-                                  Colors.white,
-                                  const Color(0xFF00E5FF),
-                                  widget.theme.accentColor,
-                                ],
-                                begin: Alignment.topCenter,
-                                end: Alignment.bottomCenter,
-                              ).createShader(bounds),
-                              child: Text(
-                                'BRAIN REBOOT',
-                                textAlign: TextAlign.center,
-                                style: GoogleFonts.orbitron(
-                                  fontSize: 42,
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: 6.5,
-                                  color: Colors.white,
-                                  shadows: [
-                                    Shadow(
-                                      color: const Color(0xFF00E5FF).withValues(alpha: 0.9),
-                                      blurRadius: 36,
-                                    ),
-                                    Shadow(
-                                      color: widget.theme.accentColor.withValues(alpha: 0.5),
-                                      blurRadius: 60,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-                      const SizedBox(height: 16),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
-                        decoration: BoxDecoration(
-                          color: widget.theme.tileDefault.withValues(alpha: 0.25),
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(
-                            color: widget.theme.panelBorder.withValues(alpha: 0.35),
-                            width: 1,
-                          ),
-                        ),
-                        child: Text(
-                          'CLEAR BRAIN FOG & ELEVATE FOCUS',
-                          style: GoogleFonts.spaceGrotesk(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 3.0,
-                            color: const Color(0xFF00E5FF).withValues(alpha: 0.9),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 48),
-
-                      // Animated Progress Loading Bar
-                      AnimatedBuilder(
-                        animation: _progressAnimation,
-                        builder: (context, child) {
-                          final progress = _progressAnimation.value;
-                          final percent = (progress * 100).toInt();
-
-                          return Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Container(
-                                width: 240,
-                                height: 8,
-                                decoration: BoxDecoration(
-                                  color: widget.theme.tileDefault.withValues(alpha: 0.35),
-                                  borderRadius: BorderRadius.circular(4),
-                                  border: Border.all(
-                                    color: widget.theme.panelBorder.withValues(alpha: 0.4),
-                                    width: 1,
-                                  ),
-                                ),
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(4),
-                                  child: Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: FractionallySizedBox(
-                                      widthFactor: progress,
-                                      child: Container(
-                                        decoration: BoxDecoration(
-                                          gradient: LinearGradient(
-                                            colors: [
-                                              widget.theme.accentColor,
-                                              widget.theme.tileActiveGlow,
-                                            ],
-                                          ),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: widget.theme.accentColor.withValues(alpha: 0.85),
-                                              blurRadius: 10,
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(height: 14),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
-                                decoration: BoxDecoration(
-                                  color: widget.theme.panelBg.withValues(alpha: 0.5),
-                                  borderRadius: BorderRadius.circular(14),
-                                  border: Border.all(
-                                    color: widget.theme.panelBorder.withValues(alpha: 0.4),
-                                    width: 1,
-                                  ),
-                                ),
-                                child: Text(
-                                  'INITIALIZING MATRIX... $percent%',
-                                  style: GoogleFonts.orbitron(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 2.2,
-                                    color: widget.theme.accentColor,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          );
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
 

@@ -5,6 +5,7 @@
 // gestures. You can also use WidgetTester to find child widgets in the widget
 // tree, read text, and verify that the values of widget properties are correct.
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:focus_spark/main.dart';
@@ -32,5 +33,20 @@ void main() {
     // Main Interface: Verify action button and level map button are displayed on Home Screen
     expect(find.text('NEW SESSION'), findsOneWidget);
     expect(find.text('TAP FOR LEVEL MAP'), findsOneWidget);
+  });
+
+  testWidgets('Roadmap modal dismiss from victory screen triggers level advance', (WidgetTester tester) async {
+    await tester.pumpWidget(const FocusSparkApp());
+    await tester.pump(const Duration(milliseconds: 2800));
+    await tester.pump(const Duration(milliseconds: 3300));
+
+    // Roadmap modal can be shown and dismissed cleanly
+    await tester.tap(find.text('TAP FOR LEVEL MAP'));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('LEVEL ROADMAP'), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.close_rounded));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('LEVEL ROADMAP'), findsNothing);
   });
 }

@@ -59,6 +59,11 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun onDestroy() {
+        stopNativeAmbientMusic()
+        super.onDestroy()
+    }
+
     private fun triggerNativeVibration(durationMs: Long) {
         try {
             val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -123,22 +128,72 @@ class MainActivity : FlutterActivity() {
                 87.31,  0.0, 87.31,  0.0, 87.31,  0.0, 87.31,  0.0
             )
 
+            val minBufSize = AudioTrack.getMinBufferSize(
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+
+            val ambientTrack = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_GAME)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(SAMPLE_RATE)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .build()
+                )
+                .setBufferSizeInBytes(minBufSize * 4)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+
+            ambientTrack.play()
+
             var stepIdx = 0
-            val stepDurationMs = 210L
+            val durationSeconds = 0.18
+            val numSamples = (SAMPLE_RATE * durationSeconds).toInt().coerceAtLeast(1)
+            val fadeLen = (SAMPLE_RATE * 0.005).toInt()
+            val amplitude = Short.MAX_VALUE * 0.12
+            val buffer = ShortArray(numSamples)
 
-            while (isAmbientPlaying) {
-                val leadFreq = melodyNotes[stepIdx]
-                val harmFreq = harmonyNotes[stepIdx]
-                val bassFreq = bassNotes[stepIdx]
+            try {
+                while (isAmbientPlaying) {
+                    val leadFreq = melodyNotes[stepIdx]
+                    val harmFreq = harmonyNotes[stepIdx]
+                    val bassFreq = bassNotes[stepIdx]
 
-                playDualTone(leadFreq, harmFreq, bassFreq, 0.18)
-                stepIdx = (stepIdx + 1) % melodyNotes.size
+                    for (i in 0 until numSamples) {
+                        var sample = amplitude * sin(2.0 * PI * leadFreq * i / SAMPLE_RATE)
+                        if (harmFreq > 0) {
+                            sample += amplitude * 0.6 * sin(2.0 * PI * harmFreq * i / SAMPLE_RATE)
+                        }
+                        if (bassFreq > 0) {
+                            sample += amplitude * 0.8 * sin(2.0 * PI * bassFreq * i / SAMPLE_RATE)
+                        }
 
-                try {
-                    Thread.sleep(stepDurationMs)
-                } catch (e: InterruptedException) {
-                    break
+                        val fadeIn = if (i < fadeLen) 0.5 * (1 - cos(PI * i / fadeLen)) else 1.0
+                        val fadeOut = if (i >= numSamples - fadeLen) 0.5 * (1 - cos(PI * (numSamples - i) / fadeLen)) else 1.0
+
+                        buffer[i] = (sample * fadeIn * fadeOut).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                    }
+
+                    ambientTrack.write(buffer, 0, numSamples)
+                    stepIdx = (stepIdx + 1) % melodyNotes.size
+
+                    val sleepMs = 210L
+                    Thread.sleep(sleepMs)
                 }
+            } catch (_: Exception) {
+            } finally {
+                try {
+                    ambientTrack.stop()
+                    ambientTrack.release()
+                } catch (_: Exception) {}
             }
         }.apply { start() }
     }
@@ -147,66 +202,6 @@ class MainActivity : FlutterActivity() {
         isAmbientPlaying = false
         ambientThread?.interrupt()
         ambientThread = null
-    }
-
-    private fun playDualTone(leadFreq: Double, harmFreq: Double, bassFreq: Double, durationSeconds: Double) {
-        val numSamples = (SAMPLE_RATE * durationSeconds).toInt().coerceAtLeast(1)
-        val fadeLen = (SAMPLE_RATE * 0.005).toInt()
-        val buffer = ShortArray(numSamples)
-        val amplitude = Short.MAX_VALUE * 0.12
-
-        for (i in 0 until numSamples) {
-            var sample = amplitude * sin(2.0 * PI * leadFreq * i / SAMPLE_RATE)
-            if (harmFreq > 0) {
-                sample += amplitude * 0.6 * sin(2.0 * PI * harmFreq * i / SAMPLE_RATE)
-            }
-            if (bassFreq > 0) {
-                sample += amplitude * 0.8 * sin(2.0 * PI * bassFreq * i / SAMPLE_RATE)
-            }
-
-            val fadeIn = if (i < fadeLen) 0.5 * (1 - cos(PI * i / fadeLen)) else 1.0
-            val fadeOut = if (i >= numSamples - fadeLen) 0.5 * (1 - cos(PI * (numSamples - i) / fadeLen)) else 1.0
-
-            buffer[i] = (sample * fadeIn * fadeOut).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-        }
-
-        val minBufSize = AudioTrack.getMinBufferSize(
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_OUT_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-        val bufSizeBytes = (numSamples * 2).coerceAtLeast(minBufSize)
-
-        val audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_GAME)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(SAMPLE_RATE)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .build()
-            )
-            .setBufferSizeInBytes(bufSizeBytes)
-            .setTransferMode(AudioTrack.MODE_STATIC)
-            .build()
-
-        try {
-            audioTrack.write(buffer, 0, numSamples)
-            audioTrack.play()
-            val sleepMs = (durationSeconds * 1000).toLong() + 10L
-            Thread.sleep(sleepMs)
-        } catch (_: Exception) {
-        } finally {
-            try {
-                audioTrack.stop()
-                audioTrack.release()
-            } catch (_: Exception) {}
-        }
     }
 
     private fun playTone(frequency: Double, durationSeconds: Double) {
