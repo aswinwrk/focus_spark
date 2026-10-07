@@ -601,6 +601,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Session Control ──────────────────────────────────────────────────────
   void _startSession() async {
+    final currentLevelBeforeRestart = _level;
+
     void launchGame() {
       if (!mounted) return;
       _cancelInputTimer();
@@ -644,7 +646,18 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       });
     }
 
-    launchGame();
+    if (currentLevelBeforeRestart > 10) {
+      if (kIsWeb) {
+        _showTestInterstitialOverlay(onDismissed: launchGame);
+      } else {
+        final shown = await AdService.instance.showInterstitialAdOrLoad(onDismissed: launchGame);
+        if (!shown) {
+          launchGame();
+        }
+      }
+    } else {
+      launchGame();
+    }
   }
 
   void _continueSession() async {
@@ -2868,7 +2881,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   }
 
   // ── Level Progression Helper ─────────────────────────────────────────────
-  void _advanceToNextLevelPlayback(int completedLevel) async {
+  void _advanceToNextLevelPlayback(int completedLevel, {bool allowAd = true}) async {
     if (!mounted || _gameState != GameState.successTransition) return;
 
     void startNextLevelSequence() {
@@ -2881,7 +2894,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _runPlayback();
     }
 
-    if (AdService.shouldShowInterstitialOnLevelComplete(completedLevel)) {
+    if (allowAd && AdService.shouldShowInterstitialOnLevelComplete(completedLevel)) {
       if (kIsWeb) {
         _showTestInterstitialOverlay(onDismissed: startNextLevelSequence);
       } else {
@@ -3140,7 +3153,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                         context,
                         theme,
                         onDismiss: () {
-                          _advanceToNextLevelPlayback(completedLevel);
+                          _advanceToNextLevelPlayback(completedLevel, allowAd: false);
                         },
                       );
                     },

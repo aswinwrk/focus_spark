@@ -176,11 +176,11 @@ class AdService {
   }
 
   /// Custom Interstitial frequency rule evaluation:
-  /// - Levels 1 - 5: No Interstitial Ad
-  /// - Levels 6 - 15: Every 2 levels (Level 6, 8, 10, 12, 14)
+  /// - Levels 1 - 10: No Interstitial Ad
+  /// - Levels 11 - 15: Every 2 levels (Level 12, 14)
   /// - Levels 16+: Every level (Level 16, 17, 18...)
   static bool shouldShowInterstitialOnLevelComplete(int completedLevel) {
-    if (completedLevel < 6) {
+    if (completedLevel <= 10) {
       return false;
     } else if (completedLevel <= 15) {
       return completedLevel % 2 == 0;
