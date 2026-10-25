@@ -98,11 +98,17 @@ class AdService {
   }
 
   /// Show Rewarded Ad and execute reward callback upon completion
-  Future<bool> showRewardedAdOrLoad({required Function(RewardItem reward) onUserEarnedReward}) async {
-    if (kIsWeb) return false;
+  Future<bool> showRewardedAdOrLoad({
+    required Function(RewardItem reward) onUserEarnedReward,
+    VoidCallback? onDismissed,
+  }) async {
+    if (kIsWeb) {
+      onDismissed?.call();
+      return false;
+    }
 
     if (_rewardedAd != null) {
-      _showRewardedAdInstance(_rewardedAd!, onUserEarnedReward);
+      _showRewardedAdInstance(_rewardedAd!, onUserEarnedReward, onDismissed);
       _rewardedAd = null;
       loadRewardedAd(); // Preload next
       return true;
@@ -115,12 +121,13 @@ class AdService {
       request: const AdRequest(),
       rewardedAdLoadCallback: RewardedAdLoadCallback(
         onAdLoaded: (ad) {
-          _showRewardedAdInstance(ad, onUserEarnedReward);
+          _showRewardedAdInstance(ad, onUserEarnedReward, onDismissed);
           loadRewardedAd(); // Preload next
           completer.complete(true);
         },
         onAdFailedToLoad: (error) {
           debugPrint('Rewarded ad load failed: $error');
+          onDismissed?.call();
           completer.complete(false);
         },
       ),
@@ -132,7 +139,14 @@ class AdService {
   VoidCallback? onAdOpened;
   VoidCallback? onAdClosed;
 
-  void _showRewardedAdInstance(RewardedAd ad, Function(RewardItem reward) onUserEarnedReward) {
+  void _showRewardedAdInstance(
+    RewardedAd ad,
+    Function(RewardItem reward) onUserEarnedReward, [
+    VoidCallback? onDismissed,
+  ]) {
+    bool earnedReward = false;
+    RewardItem? earnedRewardItem;
+
     ad.fullScreenContentCallback = FullScreenContentCallback(
       onAdShowedFullScreenContent: (ad) {
         debugPrint('Rewarded Ad showed full screen content.');
@@ -141,14 +155,20 @@ class AdService {
       onAdDismissedFullScreenContent: (ad) {
         ad.dispose();
         onAdClosed?.call();
+        if (earnedReward && earnedRewardItem != null) {
+          onUserEarnedReward(earnedRewardItem!);
+        }
+        onDismissed?.call();
       },
       onAdFailedToShowFullScreenContent: (ad, error) {
         ad.dispose();
         onAdClosed?.call();
+        onDismissed?.call();
       },
     );
     ad.show(onUserEarnedReward: (ad, reward) {
-      onUserEarnedReward(reward);
+      earnedReward = true;
+      earnedRewardItem = reward;
     });
   }
 

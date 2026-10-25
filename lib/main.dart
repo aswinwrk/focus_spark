@@ -600,6 +600,158 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   }
 
   // ── Session Control ──────────────────────────────────────────────────────
+  void _confirmAndRestartSession(GameTheme theme) {
+    if (_level <= 1 && _currentStreak == 0 && !_hasSavedSession) {
+      _startSession();
+      return;
+    }
+
+    HapticFeedback.selectionClick();
+    final wasPlaying = _gameState == GameState.playerInput;
+    if (wasPlaying) {
+      _cancelInputTimer();
+    }
+
+    showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withValues(alpha: 0.8),
+      builder: (ctx) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 380),
+            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 24),
+            decoration: BoxDecoration(
+              color: theme.panelBg,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(
+                color: const Color(0xFFEF4444).withValues(alpha: 0.6),
+                width: 1.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFFEF4444).withValues(alpha: 0.20),
+                  blurRadius: 28,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Glowing Warning Icon Badge
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: const Color(0xFFEF4444).withValues(alpha: 0.15),
+                    border: Border.all(color: const Color(0xFFEF4444), width: 1.8),
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFFEF4444).withValues(alpha: 0.35),
+                        blurRadius: 16,
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.restart_alt_rounded,
+                    size: 32,
+                    color: Color(0xFFEF4444),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Dialog Header
+                Text(
+                  'RESTART SESSION?',
+                  style: GoogleFonts.orbitron(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.5,
+                    color: Colors.white,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 10),
+
+                // Subtitle Explanation
+                Text(
+                  'Are you sure you want to restart?\nYour active progress at LEVEL $_level will be reset back to Level 1.',
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w500,
+                    color: theme.textPrimary.withValues(alpha: 0.75),
+                    height: 1.4,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 22),
+
+                // Action Buttons
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.of(ctx).pop(false),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: theme.textPrimary,
+                          side: BorderSide(color: theme.panelBorder),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: Text(
+                          'KEEP PLAYING',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.8,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.of(ctx).pop(true),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFEF4444),
+                          foregroundColor: Colors.white,
+                          elevation: 4,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: Text(
+                          'RESTART',
+                          style: GoogleFonts.orbitron(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 1.0,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    ).then((confirmed) {
+      if (confirmed == true) {
+        _startSession();
+      } else if (wasPlaying && mounted && _gameState == GameState.playerInput) {
+        _startInputTimer();
+      }
+    });
+  }
+
   void _startSession() async {
     final currentLevelBeforeRestart = _level;
 
@@ -910,6 +1062,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           }
           _startInputTimer();
           _triggerHint();
+        }
+      },
+      onDismissed: () {
+        if (mounted && _gameState == GameState.playerInput && _inputTimer == null) {
+          _startInputTimer();
         }
       },
     );
@@ -2699,7 +2856,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                 ),
                               ),
                               TextButton(
-                                onPressed: _startSession,
+                                onPressed: () => _confirmAndRestartSession(theme),
                                 style: TextButton.styleFrom(
                                   padding: const EdgeInsets.symmetric(
                                       horizontal: 10, vertical: 8),
@@ -2754,7 +2911,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                             ] else ...[
                               if (_hasSavedSession) ...[
                                 TextButton(
-                                  onPressed: _startSession,
+                                  onPressed: () => _confirmAndRestartSession(theme),
                                   style: TextButton.styleFrom(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 8, vertical: 8),
