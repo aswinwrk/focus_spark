@@ -312,17 +312,13 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _sequence.clear();
       }
 
-      final completedSavedLevel = _level - 1;
-      if (completedSavedLevel > _highScore) {
-        _highScore = completedSavedLevel;
+      if (_level > _highScore) {
+        _highScore = _level;
         _storageService!.setHighScore(_highScore);
       }
 
-      if (!_isMusicMuted) {
-        AudioService.instance.startAmbientMusic();
-      } else {
-        AudioService.instance.stopAmbientMusic();
-      }
+      // Music will be started after splash screen completes (_splashStage == 2)
+      // See FullScreenSplashScreen.onLoadingComplete callback
 
       // Load Hall of Fame Leaderboard
       final String leaderboardStr = _storageService!.getHallOfFameJson();
@@ -1310,8 +1306,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           _freeHintsRemainingInLevel = 1;
           if (_level > _sessionMaxLevel) _sessionMaxLevel = _level;
           if (_currentStreak > _sessionMaxStreak) _sessionMaxStreak = _currentStreak;
-          if (completedLevel > _highScore) {
-            _highScore = completedLevel;
+          if (_level > _highScore) {
+            _highScore = _level;
             _storageService?.setHighScore(_highScore);
           }
 
@@ -2212,7 +2208,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                 Container(height: 18, width: 1, color: theme.panelBorder.withValues(alpha: 0.3)),
                                 _buildHUDItem('STREAK', '$_currentStreak 🔥', theme, fontSize: 11.0),
                                 Container(height: 18, width: 1, color: theme.panelBorder.withValues(alpha: 0.3)),
-                                _buildHUDItem('BEST', 'LVL $_highScore', theme, fontSize: 11.0),
+                                _buildHUDItem('BEST', 'LVL ${math.max(_level, _highScore)}', theme, fontSize: 11.0),
                               ],
                             ),
                           ),
@@ -2707,7 +2703,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                               ? theme.accentColor
                                               : null),
                                       _buildHUDItem(
-                                          'BEST', _highScore.toString(), theme),
+                                          'BEST',
+                                          math.max(_level, _highScore).toString(),
+                                          theme),
                                     ],
                                   ),
                                 ),
@@ -3258,7 +3256,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                       Expanded(
                         child: _buildHUDItem(
                             'BEST SCORE',
-                            'LVL $_highScore',
+                            'LVL ${math.max(_level, _highScore)}',
                             theme,
                             fontSize: 14.0),
                       ),
@@ -3357,7 +3355,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       context,
       theme: theme,
       currentLevel: _level,
-      highScoreLevel: _highScore,
+      highScoreLevel: math.max(_level, _highScore),
     ).then((_) {
       if (mounted) {
         onDismiss?.call();

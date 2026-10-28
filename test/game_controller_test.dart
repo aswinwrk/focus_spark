@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:focus_spark/game/game_controller.dart';
 import 'package:focus_spark/game/game_state_enums.dart';
+import 'package:focus_spark/services/ad_service.dart';
 
 void main() {
   group('GameController Unit Tests', () {
@@ -82,6 +83,26 @@ void main() {
       expect(controller.calculateStars(0.80), 3);
       expect(controller.calculateStars(0.50), 2);
       expect(controller.calculateStars(0.10), 1);
+    });
+
+    test('Option B Interstitial schedule has 0 ads for Lvl 1-10 and 2-level gap for Lvl 11+', () {
+      // Levels 1 to 10: ZERO ads
+      for (int i = 1; i <= 10; i++) {
+        expect(AdService.shouldShowInterstitialOnLevelComplete(i), false);
+      }
+
+      // Levels 11+: 2 levels gap in between (13, 16, 19, 22...)
+      expect(AdService.shouldShowInterstitialOnLevelComplete(11), false);
+      expect(AdService.shouldShowInterstitialOnLevelComplete(12), false);
+      expect(AdService.shouldShowInterstitialOnLevelComplete(13), true);
+
+      expect(AdService.shouldShowInterstitialOnLevelComplete(14), false);
+      expect(AdService.shouldShowInterstitialOnLevelComplete(15), false);
+      expect(AdService.shouldShowInterstitialOnLevelComplete(16), true);
+
+      expect(AdService.shouldShowInterstitialOnLevelComplete(17), false);
+      expect(AdService.shouldShowInterstitialOnLevelComplete(18), false);
+      expect(AdService.shouldShowInterstitialOnLevelComplete(19), true);
     });
   });
 }

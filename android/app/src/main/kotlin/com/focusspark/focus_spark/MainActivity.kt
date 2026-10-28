@@ -152,14 +152,17 @@ class MainActivity : FlutterActivity() {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
-            ambientTrack.play()
+            // Don't call play() yet — pre-fill the buffer first to avoid
+            // an initial speed-burst caused by rapid non-blocking writes
+            // into an empty AudioTrack buffer.
 
             var stepIdx = 0
             val durationSeconds = 0.18
             val numSamples = (SAMPLE_RATE * durationSeconds).toInt().coerceAtLeast(1)
             val fadeLen = (SAMPLE_RATE * 0.005).toInt()
-            val amplitude = Short.MAX_VALUE * 0.12
+            val amplitude = Short.MAX_VALUE * 0.07
             val buffer = ShortArray(numSamples)
+            var hasStartedPlayback = false
 
             try {
                 while (isAmbientPlaying) {
@@ -183,6 +186,13 @@ class MainActivity : FlutterActivity() {
                     }
 
                     ambientTrack.write(buffer, 0, numSamples)
+
+                    // Start playback only after the first note is in the buffer
+                    if (!hasStartedPlayback) {
+                        ambientTrack.play()
+                        hasStartedPlayback = true
+                    }
+
                     stepIdx = (stepIdx + 1) % melodyNotes.size
 
                     val sleepMs = 210L

@@ -195,18 +195,14 @@ class AdService {
     );
   }
 
-  /// Custom Interstitial frequency rule evaluation:
-  /// - Levels 1 - 10: No Interstitial Ad
-  /// - Levels 11 - 15: Every 2 levels (Level 12, 14)
-  /// - Levels 16+: Every level (Level 16, 17, 18...)
+  /// Custom Interstitial frequency rule evaluation (Option B - Balanced 2-level gap):
+  /// - Levels 1 - 10: No Interstitial Ad (zero ads)
+  /// - Levels 11+: Every 3 levels (Level 13, 16, 19, 22, 25...), leaving a full 2-level gap
   static bool shouldShowInterstitialOnLevelComplete(int completedLevel) {
     if (completedLevel <= 10) {
       return false;
-    } else if (completedLevel <= 15) {
-      return completedLevel % 2 == 0;
-    } else {
-      return true;
     }
+    return (completedLevel - 10) % 3 == 0;
   }
 
   /// Show Interstitial Ad if available or load on-demand
