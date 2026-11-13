@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui';
@@ -26,6 +26,7 @@ import 'ui/modals/level_roadmap_modal.dart';
 import 'ui/modals/tutorial_modal.dart';
 import 'ui/modals/edit_player_name_modal.dart';
 import 'services/storage_service.dart';
+import 'services/play_games_service.dart';
 import 'game/game_controller.dart';
 
 void main() async {
@@ -335,15 +336,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       }
 
       if (loadedLeaderboard.isEmpty) {
-        // Initial seed entries
-        final now = DateTime.now();
-        loadedLeaderboard = [
-          LeaderboardEntry(playerName: 'Zen Master', level: 12, streak: 12, date: now.subtract(const Duration(days: 1))),
-          LeaderboardEntry(playerName: 'Mindful Seeker', level: 9, streak: 9, date: now.subtract(const Duration(days: 3))),
-          LeaderboardEntry(playerName: 'Brain Rebooter', level: 7, streak: 7, date: now.subtract(const Duration(days: 5))),
-          LeaderboardEntry(playerName: 'Memory Runner', level: 5, streak: 5, date: now.subtract(const Duration(days: 7))),
-          LeaderboardEntry(playerName: 'Calm Thinker', level: 3, streak: 3, date: now.subtract(const Duration(days: 9))),
-        ];
+        // No fake entries - purely real player scores
+        loadedLeaderboard = [];
       }
       _leaderboard = _deduplicateLeaderboardEntries(loadedLeaderboard);
     });
@@ -413,6 +407,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     final String jsonStr = jsonEncode(_leaderboard.map((e) => e.toJson()).toList());
     await _storageService?.setHallOfFameJson(jsonStr);
+    // Also submit to Google Play Games leaderboard
+    await PlayGamesService.submitScore(level);
     if (mounted) setState(() {});
   }
 
@@ -2526,6 +2522,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             if (!_isMusicMuted) {
               AudioService.instance.startAmbientMusic();
             }
+            // Sign in to Google Play Games silently after splash and sync existing score
+            PlayGamesService.signIn().then((signedIn) {
+              if (signedIn && _highScore > 0) {
+                PlayGamesService.submitScore(_highScore);
+              }
+            });
           }
         },
       );
@@ -3397,17 +3399,91 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     );
   }
 
-  void _showLeaderboardModal(BuildContext context, GameTheme theme) {
+  Future<void> _showLeaderboardModal(BuildContext context, GameTheme theme) async {
     HapticFeedback.selectionClick();
-    LeaderboardModal.show(
-      context,
-      theme: theme,
-      leaderboard: _leaderboard,
-      activePlayerName: _playerName,
-      onEditGamerTag: () {
-        _showEditPlayerNameModal(context, theme);
-      },
-    );
+    // Directly open Google Play Games official leaderboard
+    final result = await PlayGamesService.showLeaderboard();
+    if (!result.opened && mounted) {
+      showDialog(
+        context: this.context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: theme.panelBg.withValues(alpha: 0.95),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: BorderSide(color: theme.accentColor.withValues(alpha: 0.5)),
+          ),
+          title: Text(
+            'PLAY GAMES UNAVAILABLE',
+            style: GoogleFonts.orbitron(
+              color: theme.textPrimary,
+              fontSize: 15,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Could not open Google Play Games Leaderboard.',
+                style: TextStyle(
+                  color: theme.textPrimary.withValues(alpha: 0.8),
+                  fontSize: 13,
+                ),
+              ),
+              if (result.error != null && result.error!.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.35),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: SelectableText(
+                    result.error!,
+                    style: const TextStyle(
+                      color: Colors.amberAccent,
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                if (mounted) {
+                  LeaderboardModal.show(
+                    this.context,
+                    theme: theme,
+                    leaderboard: _leaderboard,
+                    activePlayerName: _playerName,
+                    onEditGamerTag: () {
+                      _showEditPlayerNameModal(this.context, theme);
+                    },
+                  );
+                }
+              },
+              child: Text(
+                'Offline Scores',
+                style: TextStyle(color: theme.textPrimary.withValues(alpha: 0.7)),
+              ),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                _showLeaderboardModal(this.context, theme);
+              },
+              child: Text('Retry', style: TextStyle(color: theme.accentColor)),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   Widget _buildIconToggle({
