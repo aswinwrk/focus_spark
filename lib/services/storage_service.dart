@@ -21,6 +21,7 @@ class StorageService {
   static const String legacyHallOfFame = 'focus_spark_hall_of_fame';
 
   final SharedPreferences _prefs;
+  String? _currentUserId;
 
   StorageService(this._prefs);
 
@@ -29,12 +30,27 @@ class StorageService {
     return StorageService(prefs);
   }
 
+  /// Sets the active Google Play Games player ID so scores & progress are cleanly separated per account.
+  void setUserId(String? userId) {
+    _currentUserId = (userId != null && userId.trim().isNotEmpty) ? userId.trim() : null;
+  }
+
+  String? get currentUserId => _currentUserId;
+
+  String _userKey(String baseKey) {
+    if (_currentUserId == null || _currentUserId!.isEmpty) {
+      return baseKey;
+    }
+    return '${_currentUserId}_$baseKey';
+  }
+
   int getHighScore() {
-    return _prefs.getInt(keyHighScore) ?? _prefs.getInt(legacyHighScore) ?? 0;
+    return _prefs.getInt(_userKey(keyHighScore)) ??
+        (_currentUserId == null ? (_prefs.getInt(legacyHighScore) ?? 0) : 0);
   }
 
   Future<bool> setHighScore(int score) {
-    return _prefs.setInt(keyHighScore, score);
+    return _prefs.setInt(_userKey(keyHighScore), score);
   }
 
   bool getZenMode() {
@@ -70,13 +86,14 @@ class StorageService {
   }
 
   String getPlayerName() {
-    return _prefs.getString(keyPlayerName) ??
+    return _prefs.getString(_userKey(keyPlayerName)) ??
+        _prefs.getString(keyPlayerName) ??
         _prefs.getString(legacyPlayerName) ??
         'You';
   }
 
   Future<bool> setPlayerName(String name) {
-    return _prefs.setString(keyPlayerName, name);
+    return _prefs.setString(_userKey(keyPlayerName), name);
   }
 
   int getThemeIndex() {
@@ -88,37 +105,40 @@ class StorageService {
   }
 
   bool hasSeenTutorial() {
-    return _prefs.getBool(keySeenTutorial) ?? false;
+    return _prefs.getBool(_userKey(keySeenTutorial)) ??
+        _prefs.getBool(keySeenTutorial) ??
+        false;
   }
 
   Future<bool> setSeenTutorial(bool value) {
-    return _prefs.setBool(keySeenTutorial, value);
+    return _prefs.setBool(_userKey(keySeenTutorial), value);
   }
 
   String getHallOfFameJson() {
-    return _prefs.getString(keyHallOfFame) ??
+    return _prefs.getString(_userKey(keyHallOfFame)) ??
+        _prefs.getString(keyHallOfFame) ??
         _prefs.getString(legacyHallOfFame) ??
         '';
   }
 
   Future<bool> setHallOfFameJson(String jsonStr) {
-    return _prefs.setString(keyHallOfFame, jsonStr);
+    return _prefs.setString(_userKey(keyHallOfFame), jsonStr);
   }
 
   bool hasActiveGame() {
-    return _prefs.getBool(keyHasActiveGame) ?? false;
+    return _prefs.getBool(_userKey(keyHasActiveGame)) ?? false;
   }
 
   int getCurrentLevel() {
-    return _prefs.getInt(keyCurrentLevel) ?? 1;
+    return _prefs.getInt(_userKey(keyCurrentLevel)) ?? 1;
   }
 
   int getCurrentStreak() {
-    return _prefs.getInt(keyCurrentStreak) ?? 0;
+    return _prefs.getInt(_userKey(keyCurrentStreak)) ?? 0;
   }
 
   String getCurrentSequenceStr() {
-    return _prefs.getString(keyCurrentSequence) ?? '';
+    return _prefs.getString(_userKey(keyCurrentSequence)) ?? '';
   }
 
   Future<void> saveActiveGame({
@@ -126,14 +146,14 @@ class StorageService {
     required int streak,
     required List<int> sequence,
   }) async {
-    await _prefs.setBool(keyHasActiveGame, true);
-    await _prefs.setInt(keyCurrentLevel, level);
-    await _prefs.setInt(keyCurrentStreak, streak);
-    await _prefs.setString(keyCurrentSequence, sequence.join(','));
+    await _prefs.setBool(_userKey(keyHasActiveGame), true);
+    await _prefs.setInt(_userKey(keyCurrentLevel), level);
+    await _prefs.setInt(_userKey(keyCurrentStreak), streak);
+    await _prefs.setString(_userKey(keyCurrentSequence), sequence.join(','));
   }
 
   Future<void> clearActiveGame() async {
-    await _prefs.setBool(keyHasActiveGame, false);
-    await _prefs.remove(keyCurrentSequence);
+    await _prefs.setBool(_userKey(keyHasActiveGame), false);
+    await _prefs.remove(_userKey(keyCurrentSequence));
   }
 }

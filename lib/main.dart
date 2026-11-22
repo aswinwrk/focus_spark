@@ -265,12 +265,47 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       if (!_isMusicMuted && _splashStage == 2) {
         AudioService.instance.startAmbientMusic();
       }
+      if (_splashStage == 2) {
+        _syncPlayGamesUserAndSettings();
+      }
     }
   }
 
   // ── Persistence ─────────────────────────────────────────────────────────
   Future<void> _loadSettings() async {
     _storageService = await StorageService.init();
+    await _loadSettingsFromStorage();
+  }
+
+  Future<void> _syncPlayGamesUserAndSettings() async {
+    try {
+      final signedIn = await PlayGamesService.signIn();
+      if (!signedIn || !mounted) return;
+
+      final playerId = await PlayGamesService.getPlayerId();
+      final playerName = await PlayGamesService.getPlayerName();
+
+      if (_storageService != null && playerId != null && playerId.isNotEmpty) {
+        if (_storageService!.currentUserId != playerId) {
+          _storageService!.setUserId(playerId);
+          if (playerName != null && playerName.isNotEmpty) {
+            await _storageService!.setPlayerName(playerName);
+          }
+          await _loadSettingsFromStorage();
+
+          final userHighScore = _storageService!.getHighScore();
+          if (userHighScore > 0) {
+            PlayGamesService.submitScore(userHighScore);
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Sync Play Games User error: $e');
+    }
+  }
+
+  Future<void> _loadSettingsFromStorage() async {
+    if (_storageService == null || !mounted) return;
     final bool hasSavedGame = _storageService!.hasActiveGame();
     final int savedLevel = _storageService!.getCurrentLevel();
     final int savedStreak = _storageService!.getCurrentStreak();
@@ -2649,12 +2684,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             if (!_isMusicMuted) {
               AudioService.instance.startAmbientMusic();
             }
-            // Sign in to Google Play Games silently after splash and sync existing score
-            PlayGamesService.signIn().then((signedIn) {
-              if (signedIn && _highScore > 0) {
-                PlayGamesService.submitScore(_highScore);
-              }
-            });
+            // Sign in to Google Play Games and cleanly separate data per account
+            _syncPlayGamesUserAndSettings();
           }
         },
       );

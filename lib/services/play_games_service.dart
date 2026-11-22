@@ -27,6 +27,32 @@ class PlayGamesService {
     }
   }
 
+  /// Returns the unique Google Play Games Player ID for the authenticated user.
+  static Future<String?> getPlayerId() async {
+    try {
+      final signedIn = await isSignedIn();
+      if (!signedIn) return null;
+      final id = await GamesServices.getPlayerID();
+      return id?.isNotEmpty == true ? id : null;
+    } catch (e) {
+      debugPrint('PlayGames getPlayerId error: $e');
+      return null;
+    }
+  }
+
+  /// Returns the player display name from Google Play Games.
+  static Future<String?> getPlayerName() async {
+    try {
+      final signedIn = await isSignedIn();
+      if (!signedIn) return null;
+      final name = await GamesServices.getPlayerName();
+      return name?.isNotEmpty == true ? name : null;
+    } catch (e) {
+      debugPrint('PlayGames getPlayerName error: $e');
+      return null;
+    }
+  }
+
   static String _formatError(Object e) {
     if (e is PlatformException) {
       return 'Code: ${e.code} | ${e.message ?? e.details ?? "Unknown error"}';
