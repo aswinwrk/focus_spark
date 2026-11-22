@@ -107,6 +107,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // Track the current playback session ID to cancel outdated async loops
   int _playbackSessionId = 0;
+  bool _isConfirmingRestart = false;
 
   // Level & Session Persistence
   bool _hasSavedSession = false;
@@ -164,6 +165,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   late AnimationController _tutorialHandController;
   bool _isVisualTutorialActive = false;
+  bool _isTutorialWaitingForTap = false;
   bool _showReverseAnnouncementOverlay = false;
 
   @override
@@ -584,6 +586,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     if (!mounted) return;
     setState(() {
       _isVisualTutorialActive = true;
+      _isTutorialWaitingForTap = true;
       _hasSeenTutorial = true;
       _showTutorialCard = false;
     });
@@ -591,20 +594,52 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     _startSession();
   }
 
+  void _startTutorialPlayback() {
+    if (!_isTutorialWaitingForTap) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _isTutorialWaitingForTap = false;
+      _gameState = GameState.playback;
+    });
+    _runPlayback();
+  }
+
+  void _skipTutorial() {
+    HapticFeedback.selectionClick();
+    setState(() {
+      _isVisualTutorialActive = false;
+      _isTutorialWaitingForTap = false;
+      _hasSeenTutorial = true;
+    });
+    _storageService?.setSeenTutorial(true);
+    if (_gameState == GameState.playback && _sequence.isNotEmpty) {
+      _runPlayback();
+    } else if (_gameState == GameState.playerInput) {
+      _startInputTimer();
+    }
+  }
+
   // ── Session Control ──────────────────────────────────────────────────────
-  void _confirmAndRestartSession(GameTheme theme) {
+  void _confirmAndRestartSession(GameTheme theme) async {
     if (_level <= 1 && _currentStreak == 0 && !_hasSavedSession) {
       _startSession();
       return;
     }
 
     HapticFeedback.selectionClick();
-    final wasPlaying = _gameState == GameState.playerInput;
-    if (wasPlaying) {
-      _cancelInputTimer();
-    }
+    final previousState = _gameState;
 
-    showDialog<bool>(
+    // Immediately stop sequence playback and cancel input timers
+    _cancelInputTimer();
+    _playbackSessionId++; // Invalidate active sequence playback loops
+
+    setState(() {
+      _gameState = GameState.paused;
+      _activePlaybackTile = null;
+      _isConfirmingRestart = true;
+    });
+
+    final confirmed = await showDialog<bool>(
       context: context,
       barrierDismissible: true,
       barrierColor: Colors.black.withValues(alpha: 0.8),
@@ -735,13 +770,35 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           ),
         );
       },
-    ).then((confirmed) {
-      if (confirmed == true) {
-        _startSession();
-      } else if (wasPlaying && mounted && _gameState == GameState.playerInput) {
-        _startInputTimer();
-      }
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      _isConfirmingRestart = false;
     });
+
+    if (confirmed == true) {
+      _startSession();
+    } else {
+      // User cancelled restart dialog - resume previous game state
+      if (previousState == GameState.playback) {
+        setState(() {
+          _gameState = GameState.playback;
+          _playerInput.clear();
+        });
+        _runPlayback();
+      } else if (previousState == GameState.playerInput) {
+        setState(() {
+          _gameState = GameState.playerInput;
+        });
+        _startInputTimer();
+      } else {
+        setState(() {
+          _gameState = previousState;
+        });
+      }
+    }
   }
 
   void _startSession() async {
@@ -785,8 +842,15 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         }
 
         if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
-        setState(() => _sequence.add(_random.nextInt(9)));
-        _runPlayback();
+        setState(() {
+          _sequence.add(_random.nextInt(9));
+          if (_isVisualTutorialActive && _level <= 2) {
+            _isTutorialWaitingForTap = true;
+          }
+        });
+        if (!_isTutorialWaitingForTap) {
+          _runPlayback();
+        }
       });
     }
 
@@ -862,8 +926,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     final int activeMs = isTutorialMode ? 1000 : (speedMs * 0.75).round();
     final int gapMs = isTutorialMode ? 600 : (speedMs - activeMs);
 
-    // Pre-playback pause (2.4s for tutorial, 2.2s for Reverse Mode announcement) so user can comfortably read text
-    final int prePauseMs = isTutorialMode ? 2400 : (isReverseMode ? 2200 : 300);
+    // Pre-playback pause (500ms for tutorial since user already tapped to watch, 2.2s for Reverse Mode announcement)
+    final int prePauseMs = isTutorialMode ? 500 : (isReverseMode ? 2200 : 300);
     await Future.delayed(Duration(milliseconds: prePauseMs));
     if (_showReverseAnnouncementOverlay && mounted) {
       setState(() => _showReverseAnnouncementOverlay = false);
@@ -892,8 +956,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     if (_gameState == GameState.playback && _playbackSessionId == currentSession) {
       if (isTutorialMode) {
-        // Generous 2.2s transition pause so user can comfortably read Step 2 text before tapping
-        await Future.delayed(const Duration(milliseconds: 2200));
+        // Brief 600ms transition so user cleanly sees playback end before input
+        await Future.delayed(const Duration(milliseconds: 600));
         if (_gameState != GameState.playback || _playbackSessionId != currentSession) return;
       }
       setState(() {
@@ -1005,7 +1069,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     HapticFeedback.mediumImpact();
   }
 
-  void _onHintPressed() {
+  void _onHintPressed(GameTheme theme) {
     if (_gameState != GameState.playerInput || _isAdActive) return;
 
     if (_freeHintsRemainingInLevel > 0) {
@@ -1014,32 +1078,15 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       });
       _triggerHint();
     } else {
-      _playDirectRewardedAd();
+      _playDirectRewardedAd(theme);
     }
   }
 
-  void _showTestInterstitialOverlay({VoidCallback? onDismissed}) async {
-    if (_isAdActive) return;
-    _cancelInputTimer();
-    HapticFeedback.mediumImpact();
-
-    setState(() {
-      _isAdActive = true;
-      _activeAdType = 'INTERSTITIAL TEST AD';
-    });
-
-    await Future.delayed(const Duration(milliseconds: 2500));
-
-    if (!mounted) return;
-
-    setState(() {
-      _isAdActive = false;
-    });
-
+  void _showTestInterstitialOverlay({VoidCallback? onDismissed}) {
     onDismissed?.call();
   }
 
-  void _playDirectRewardedAd() async {
+  void _playDirectRewardedAd(GameTheme theme) async {
     if (_isAdActive) return;
     _cancelInputTimer();
     HapticFeedback.mediumImpact();
@@ -1065,149 +1112,101 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     if (shown) return;
 
-    // Fallback visible test ad overlay for rewarded ad
-    setState(() {
-      _isAdActive = true;
-      _activeAdType = 'REWARDED VIDEO TEST AD';
-    });
-
-    await Future.delayed(const Duration(milliseconds: 3000));
-
+    // Ad is not available (e.g. device is offline)
     if (!mounted) return;
 
-    setState(() {
-      _isAdActive = false;
-      if (_gameState != GameState.playerInput) {
+    if (_gameState != GameState.playerInput) {
+      setState(() {
         _gameState = GameState.playerInput;
-      }
-    });
+      });
+    }
 
-    _startInputTimer();
-    _triggerHint();
+    _showAdNotAvailableDialog(theme);
   }
 
-  Widget _buildDirectAdOverlay(GameTheme theme) {
-    if (!_isAdActive) return const SizedBox.shrink();
-    final isRewarded = _activeAdType.contains('REWARDED');
-
-    return Positioned.fill(
-      child: Container(
-        color: Colors.black.withValues(alpha: 0.94),
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+  void _showAdNotAvailableDialog(GameTheme theme) async {
+    HapticFeedback.lightImpact();
+    _cancelInputTimer();
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: theme.panelBg.withValues(alpha: 0.96),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: BorderSide(
+            color: const Color(0xFFF59E0B).withValues(alpha: 0.5),
+            width: 1.5,
+          ),
+        ),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: theme.panelBg,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: const Color(0xFF4285F4).withValues(alpha: 0.6),
-                  width: 1.5,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF4285F4).withValues(alpha: 0.3),
-                    blurRadius: 32,
-                  ),
-                ],
+                color: const Color(0xFFF59E0B).withValues(alpha: 0.15),
+                shape: BoxShape.circle,
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // Google AdMob Test Ad Header Tag
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFEA4335),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: const Text(
-                          'Ad',
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Google AdMob Test Ad',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 1.0,
-                          color: theme.textPrimary.withValues(alpha: 0.85),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 20),
-
-                  // Center Ad Icon
-                  Icon(
-                    isRewarded ? Icons.ondemand_video_rounded : Icons.branding_watermark_rounded,
-                    color: const Color(0xFF4285F4),
-                    size: 48,
-                  ),
-                  const SizedBox(height: 16),
-
-                  Text(
-                    _activeAdType,
-                    style: TextStyle(
-                      color: theme.textPrimary,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 2.0,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    isRewarded
-                        ? 'Watching Test Video... Reward: +1 Free Hint'
-                        : 'Google Test Interstitial Ad View',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: theme.textPrimary.withValues(alpha: 0.65),
-                      fontSize: 11,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Progress loading indicator
-                  const SizedBox(
-                    width: 28,
-                    height: 28,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF4285F4)),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-
-                  // Ad Unit ID Subtitle
-                  Text(
-                    isRewarded
-                        ? 'Unit ID: ca-app-pub-3940256099942544/5224354917'
-                        : 'Unit ID: ca-app-pub-3940256099942544/1033173712',
-                    style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w600,
-                      color: theme.textPrimary.withValues(alpha: 0.4),
-                    ),
-                  ),
-                ],
+              child: const Icon(
+                Icons.wifi_off_rounded,
+                color: Color(0xFFF59E0B),
+                size: 22,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'AD NOT AVAILABLE',
+                style: GoogleFonts.orbitron(
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.5,
+                  color: theme.textPrimary,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          'Please connect to the internet to watch an ad and unlock extra hints.',
+          style: TextStyle(
+            color: theme.textPrimary.withValues(alpha: 0.85),
+            fontSize: 13,
+            height: 1.45,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              backgroundColor: const Color(0xFFF59E0B).withValues(alpha: 0.15),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(
+                  color: const Color(0xFFF59E0B).withValues(alpha: 0.4),
+                ),
+              ),
+            ),
+            child: const Text(
+              'OK',
+              style: TextStyle(
+                color: Color(0xFFF59E0B),
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+                letterSpacing: 1.0,
               ),
             ),
           ),
-        ),
+        ],
       ),
     );
+
+    if (mounted && _gameState == GameState.playerInput) {
+      _startInputTimer();
+    }
   }
+
+  Widget _buildDirectAdOverlay(GameTheme theme) => const SizedBox.shrink();
 
   // ── Go Home ──────────────────────────────────────────────────────────────
   void _goHome() async {
@@ -1221,6 +1220,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     setState(() {
       _gameState = GameState.startScreen;
+      _isTutorialWaitingForTap = false;
       _activePlaybackTile = null;
       _correctErrorTile = null;
       _activeTapTile = null;
@@ -1244,6 +1244,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     setState(() {
       _gameState = GameState.startScreen;
+      _isTutorialWaitingForTap = false;
       _sequence.clear();
       _playerInput.clear();
       _level = 1;
@@ -1272,6 +1273,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Tile Click ───────────────────────────────────────────────────────────
   void _handleTileClick(int clickedIndex) {
+    if (_isTutorialWaitingForTap) {
+      _startTutorialPlayback();
+      return;
+    }
     if (_gameState != GameState.playerInput) return;
 
     _triggerHaptic(HapticType.light);
@@ -1357,8 +1362,13 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             _correctErrorTile = null;
             _gameState = GameState.playback;
             _playerInput.clear();
+            if (_isVisualTutorialActive && _level <= 2) {
+              _isTutorialWaitingForTap = true;
+            }
           });
-          _runPlayback();
+          if (!_isTutorialWaitingForTap) {
+            _runPlayback();
+          }
         }
       });
     }
@@ -1942,27 +1952,19 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Interactive Animated Visual Tutorial Overlay ─────────────────────────
   Widget _buildInteractiveTutorialOverlay(GameTheme theme) {
-    if (!_isVisualTutorialActive || _level > 2 || _gameState == GameState.startScreen || _gameState == GameState.paused) {
+    if (!_isVisualTutorialActive || _level > 2 || _gameState == GameState.startScreen || _gameState == GameState.paused || _isTutorialWaitingForTap) {
       return const SizedBox.shrink();
     }
 
     int? targetTileIndex;
-    String stepTitle = '';
-    String stepInstruction = '';
     Color stepGlowColor = theme.accentColor;
 
     if (_gameState == GameState.playback) {
       targetTileIndex = _activePlaybackTile;
-      stepTitle = 'STEP 1: WATCH THE SPARK 👁️';
-      stepInstruction = targetTileIndex != null
-          ? 'Watch the tiles flash in sequence!'
-          : 'Get ready to observe the sequence!';
       stepGlowColor = theme.tileActiveGlow;
     } else if (_gameState == GameState.playerInput) {
       if (_playerInput.length < _sequence.length) {
         targetTileIndex = _sequence[_playerInput.length];
-        stepTitle = 'STEP 2: REPLICATE PATTERN 🎯';
-        stepInstruction = 'Now tap the exact same tile!';
         stepGlowColor = const Color(0xFFFFD700);
       }
     }
@@ -1978,8 +1980,6 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       targetX = (col * (tileSize + spacing)) + (tileSize / 2.0);
       targetY = (row * (tileSize + spacing)) + (tileSize / 2.0);
     }
-
-    final bool isTopRowTarget = targetTileIndex != null && targetTileIndex < 3;
 
     return Positioned.fill(
       child: IgnorePointer(
@@ -2031,57 +2031,6 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                     ),
                   ),
                 ],
-
-                // Pure Floating 3D Neon Tutorial Text (No dialogue box)
-                Positioned(
-                  top: isTopRowTarget ? null : 8,
-                  bottom: isTopRowTarget ? 8 : null,
-                  left: 12,
-                  right: 12,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        stepTitle,
-                        style: GoogleFonts.orbitron(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 1.4,
-                          color: stepGlowColor,
-                          shadows: [
-                            Shadow(
-                              color: Colors.black.withValues(alpha: 0.9),
-                              blurRadius: 10,
-                              offset: const Offset(0, 2),
-                            ),
-                            Shadow(
-                              color: stepGlowColor.withValues(alpha: 0.8),
-                              blurRadius: 16,
-                            ),
-                          ],
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        stepInstruction,
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                          shadows: [
-                            Shadow(
-                              color: Colors.black.withValues(alpha: 0.9),
-                              blurRadius: 8,
-                              offset: const Offset(0, 2),
-                            ),
-                          ],
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
-                  ),
-                ),
               ],
             );
           },
@@ -2090,8 +2039,186 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     );
   }
 
+  // ── Dedicated Bottom Tutorial Guidance Card ──────────────────────────────
+  Widget _buildBottomTutorialCard(GameTheme theme) {
+    String badgeText = '';
+    String titleText = '';
+    String descText = '';
+    IconData headerIcon = Icons.school_rounded;
+    Color accentColor = theme.accentColor;
+
+    if (_isTutorialWaitingForTap) {
+      if (_level == 1) {
+        badgeText = 'TUTORIAL • LEVEL 1';
+        titleText = 'STEP 1: WATCH CLOSELY';
+        descText = 'A tile will flash on the grid. Memorize which tile lights up!';
+        headerIcon = Icons.visibility_rounded;
+        accentColor = theme.tileActiveGlow;
+      } else {
+        badgeText = 'TUTORIAL • LEVEL 2';
+        titleText = 'GROWING SEQUENCE';
+        descText = 'Now 2 tiles will flash in sequence. Watch the exact order!';
+        headerIcon = Icons.psychology_rounded;
+        accentColor = const Color(0xFF38BDF8);
+      }
+    } else if (_gameState == GameState.playback) {
+      badgeText = 'PLAYBACK ACTIVE';
+      titleText = 'OBSERVE THE SPARK';
+      descText = _level == 1
+          ? 'Keep your eyes on the flashing tile!'
+          : 'Memorize the order of both tiles!';
+      headerIcon = Icons.remove_red_eye_rounded;
+      accentColor = theme.tileActiveGlow;
+    } else if (_gameState == GameState.playerInput) {
+      final currentStep = _playerInput.length + 1;
+      final totalSteps = _sequence.length;
+      badgeText = 'YOUR TURN';
+      titleText = totalSteps > 1
+          ? 'TAP TILE $currentStep OF $totalSteps'
+          : 'TAP THE MATCHING TILE';
+      descText = totalSteps > 1
+          ? 'Tap each tile in the exact order you observed.'
+          : 'Tap the highlighted tile indicated by the pointer.';
+      headerIcon = Icons.touch_app_rounded;
+      accentColor = const Color(0xFFFFD700);
+    } else {
+      badgeText = 'TUTORIAL';
+      titleText = 'GET READY';
+      descText = 'Follow the steps to master Brain Reboot!';
+      headerIcon = Icons.school_rounded;
+      accentColor = theme.accentColor;
+    }
+
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 380),
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+      decoration: BoxDecoration(
+        color: theme.panelBg.withValues(alpha: 0.95),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: accentColor.withValues(alpha: 0.55),
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: accentColor.withValues(alpha: 0.18),
+            blurRadius: 20,
+            spreadRadius: 1,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Header Row with Badge & Icon
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(5),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: accentColor.withValues(alpha: 0.15),
+                  border: Border.all(color: accentColor, width: 1.2),
+                ),
+                child: Icon(headerIcon, size: 14, color: accentColor),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                badgeText,
+                style: GoogleFonts.orbitron(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1.5,
+                  color: accentColor,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+
+          // Main Step Title
+          Text(
+            titleText,
+            style: GoogleFonts.orbitron(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 1.2,
+              color: Colors.white,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 5),
+
+          // Description Text
+          Text(
+            descText,
+            style: GoogleFonts.spaceGrotesk(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w500,
+              color: theme.textPrimary.withValues(alpha: 0.85),
+              height: 1.35,
+            ),
+            textAlign: TextAlign.center,
+          ),
+
+          // Interactive Action Button (when waiting for tap)
+          if (_isTutorialWaitingForTap) ...[
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _startTutorialPlayback,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: accentColor,
+                  foregroundColor: Colors.black87,
+                  elevation: 6,
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                label: Text(
+                  'TAP TO WATCH SEQUENCE ⚡',
+                  style: GoogleFonts.orbitron(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            TextButton(
+              onPressed: _skipTutorial,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: Text(
+                'SKIP TUTORIAL',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.0,
+                  color: theme.textPrimary.withValues(alpha: 0.45),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   // ── Pause Overlay ────────────────────────────────────────────────────────
   Widget _buildPauseOverlay(GameTheme theme) {
+    if (_isConfirmingRestart) {
+      return const SizedBox.shrink();
+    }
     if (_showReverseAnnouncementOverlay && _gameState == GameState.playback) {
       return _buildReverseModeAnnouncementOverlay(theme);
     }
@@ -2774,17 +2901,19 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                 const SizedBox(height: 14),
                                 // Progress dots
                                 _buildProgressDots(theme),
-                                const SizedBox(height: 12),
-                                // Status text
-                                Text(
-                                  _getStatusText(),
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    color: theme.textPrimary.withValues(alpha: 0.65),
-                                    height: 1.4,
+                                if (!_isVisualTutorialActive || _level > 2) ...[
+                                  const SizedBox(height: 12),
+                                  // Status text
+                                  Text(
+                                    _getStatusText(),
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: theme.textPrimary.withValues(alpha: 0.65),
+                                      height: 1.4,
+                                    ),
                                   ),
-                                ),
+                                ],
                               ] else ...[
                                 const SizedBox(height: 8),
                               ],
@@ -2793,15 +2922,19 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                         ),
                       ),
                     ),
-                    const SizedBox(height: 56),
+                    SizedBox(height: (isGameActive && _isVisualTutorialActive && _level <= 2) ? 14 : 56),
 
-                    // ── Controls Row ────────────────────────────────────────
-                    Wrap(
-                      alignment: WrapAlignment.center,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      spacing: 12,
-                      runSpacing: 10,
-                      children: [
+                    // ── Controls Row / Tutorial Guidance ───────────────────────
+                    if (isGameActive && _isVisualTutorialActive && _level <= 2) ...[
+                      _buildBottomTutorialCard(theme),
+                    ] else ...[
+                      // ── Controls Row ────────────────────────────────────────
+                      Wrap(
+                        alignment: WrapAlignment.center,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 12,
+                        runSpacing: 10,
+                        children: [
                         // Action Buttons
                         Wrap(
                           alignment: WrapAlignment.end,
@@ -2813,7 +2946,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                               ElevatedButton.icon(
                                 onPressed: (_gameState != GameState.playerInput || _isAdActive)
                                     ? null
-                                    : _onHintPressed,
+                                    : () => _onHintPressed(theme),
                                 style: ElevatedButton.styleFrom(
                                   backgroundColor: _freeHintsRemainingInLevel > 0
                                       ? theme.accentColor.withValues(alpha: 0.22)
@@ -2978,6 +3111,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                         ),
                       ],
                     ),
+                    ],
                     const SizedBox(height: 8),
                   ],
                 ),
@@ -2994,45 +3128,26 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   }
 
   Widget _buildBannerAdSpace(GameTheme theme) {
+    if (!_isBannerAdLoaded || _bannerAd == null) {
+      return const SizedBox.shrink();
+    }
     return Container(
       width: double.infinity,
-      height: 52.0,
+      height: _bannerAd!.size.height.toDouble(),
+      alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: theme.panelBg.withValues(alpha: 0.45),
+        color: Colors.black.withValues(alpha: 0.35),
         border: Border(
           top: BorderSide(
-            color: theme.panelBorder.withValues(alpha: 0.35),
+            color: theme.panelBorder.withValues(alpha: 0.25),
             width: 1.0,
           ),
         ),
       ),
-      child: Center(
-        child: _isBannerAdLoaded && _bannerAd != null
-            ? SizedBox(
-                width: _bannerAd!.size.width.toDouble(),
-                height: _bannerAd!.size.height.toDouble(),
-                child: AdWidget(ad: _bannerAd!),
-              )
-            : Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.subtitles_outlined,
-                    size: 15,
-                    color: theme.textPrimary.withValues(alpha: 0.35),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    'BANNER AD SPACE',
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 1.6,
-                      color: theme.textPrimary.withValues(alpha: 0.35),
-                    ),
-                  ),
-                ],
-              ),
+      child: SizedBox(
+        width: _bannerAd!.size.width.toDouble(),
+        height: _bannerAd!.size.height.toDouble(),
+        child: AdWidget(ad: _bannerAd!),
       ),
     );
   }
@@ -3046,9 +3161,14 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       setState(() {
         _gameState = GameState.playback;
         _sequence.add(_random.nextInt(9));
+        if (_isVisualTutorialActive && _level <= 2) {
+          _isTutorialWaitingForTap = true;
+        }
       });
       _saveGameProgress();
-      _runPlayback();
+      if (!_isTutorialWaitingForTap) {
+        _runPlayback();
+      }
     }
 
     if (allowAd && AdService.shouldShowInterstitialOnLevelComplete(completedLevel)) {
