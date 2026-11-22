@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui';
@@ -2712,18 +2712,6 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // 1. Leaderboard / Hall of Fame Icon (Home Screen Only)
-                        if (isStart) ...[
-                          _buildIconToggle(
-                            icon: Icons.emoji_events_outlined,
-                            isActive: false,
-                            onTap: () => _showLeaderboardModal(context, theme),
-                            theme: theme,
-                            tooltip: 'Hall of Fame',
-                          ),
-                          const SizedBox(width: 4),
-                        ],
-
                         // Return to Home (Active Gameplay Only)
                         if (isGameActive) ...[
                           _buildIconToggle(
@@ -2735,6 +2723,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                           ),
                           const SizedBox(width: 4),
                         ],
+
+                        // 1. Illuminated Leaderboard / Hall of Fame Icon (Available in Both Home & Gameplay!)
+                        _buildLeaderboardIconButton(theme),
+                        const SizedBox(width: 4),
 
                         // 2a. Ambient Music Toggle Button
                         _buildIconToggle(
@@ -3635,6 +3627,57 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         ),
       );
     }
+  }
+
+  Widget _buildLeaderboardIconButton(GameTheme theme) {
+    return Tooltip(
+      message: 'Hall of Fame Leaderboard',
+      child: GestureDetector(
+        onTap: () {
+          HapticFeedback.selectionClick();
+          // Pause game safely if viewing leaderboard during active gameplay
+          if (_gameState == GameState.playerInput || _gameState == GameState.playback) {
+            _cancelInputTimer();
+            _playbackSessionId++;
+            setState(() {
+              _gameState = GameState.paused;
+              _activePlaybackTile = null;
+            });
+          }
+          _showLeaderboardModal(context, theme);
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 250),
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF59E0B).withValues(alpha: 0.16),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: const Color(0xFFF59E0B).withValues(alpha: 0.65),
+              width: 1.3,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFFF59E0B).withValues(alpha: 0.35),
+                blurRadius: 10,
+                spreadRadius: 1,
+              ),
+            ],
+          ),
+          child: const Icon(
+            Icons.emoji_events_rounded,
+            color: Color(0xFFFFC107),
+            size: 20,
+            shadows: [
+              Shadow(
+                color: Color(0xFFF59E0B),
+                blurRadius: 10,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildIconToggle({

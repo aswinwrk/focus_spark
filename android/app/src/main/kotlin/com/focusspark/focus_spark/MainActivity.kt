@@ -1,29 +1,31 @@
 package com.focusspark.focus_spark
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
-import io.flutter.embedding.android.FlutterActivity
-import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.plugin.common.MethodChannel
-import kotlin.math.*
-
-import android.content.Context
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.*
 
 class MainActivity : FlutterActivity() {
 
     companion object {
         private const val CHANNEL = "com.focusspark.focus_spark/audio"
         private const val SAMPLE_RATE = 44100
+        private const val CHUNK_SIZE = 2048
     }
 
+    private val ambientSessionId = AtomicInteger(0)
     @Volatile
-    private var isAmbientPlaying = false
-    private var ambientThread: Thread? = null
+    private var currentAmbientTrack: AudioTrack? = null
+    private val ambientLock = Any()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -38,7 +40,10 @@ class MainActivity : FlutterActivity() {
                     val duration  = (call.argument<Any>("duration")  as? Number)?.toDouble() ?: 0.2
                     Thread {
                         playTone(frequency, duration)
-                    }.start()
+                    }.apply {
+                        isDaemon = true
+                        start()
+                    }
                     result.success(null)
                 }
                 "startAmbientMusic" -> {
@@ -57,6 +62,11 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    override fun onPause() {
+        stopNativeAmbientMusic()
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -93,39 +103,38 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun stopNativeAmbientMusic() {
+        ambientSessionId.incrementAndGet()
+        synchronized(ambientLock) {
+            try {
+                currentAmbientTrack?.let { track ->
+                    if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                        track.pause()
+                        track.flush()
+                        track.stop()
+                    }
+                    track.release()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("FocusSpark", "Error stopping ambient track: ${e.message}")
+            } finally {
+                currentAmbientTrack = null
+            }
+        }
+    }
+
     private fun startNativeAmbientMusic() {
-        if (isAmbientPlaying) return
-        isAmbientPlaying = true
+        // Stop any currently running instance first
+        stopNativeAmbientMusic()
+        val mySession = ambientSessionId.incrementAndGet()
 
-        ambientThread = Thread {
-            // Upbeat Dual-Harmony Arcade Electro Melody (142 BPM)
-            val melodyNotes = doubleArrayOf(
-                // Bar 1: C Major
-                523.25, 659.25, 783.99, 1046.50, 783.99, 659.25, 783.99, 1046.50,
-                // Bar 2: G Major
-                392.00, 493.88, 587.33, 783.99, 587.33, 493.88, 587.33, 783.99,
-                // Bar 3: A Minor
-                440.00, 523.25, 659.25, 880.00, 659.25, 523.25, 659.25, 880.00,
-                // Bar 4: F Major
-                349.23, 440.00, 523.25, 698.46, 523.25, 440.00, 523.25, 698.46
-            )
-
-            val harmonyNotes = doubleArrayOf(
-                // Bar 1
-                329.63, 392.00, 523.25, 659.25, 523.25, 392.00, 523.25, 659.25,
-                // Bar 2
-                246.94, 293.66, 392.00, 493.88, 392.00, 293.66, 392.00, 493.88,
-                // Bar 3
-                261.63, 329.63, 440.00, 523.25, 440.00, 329.63, 440.00, 523.25,
-                // Bar 4
-                220.00, 261.63, 349.23, 440.00, 349.23, 261.63, 349.23, 440.00
-            )
-
-            val bassNotes = doubleArrayOf(
-                130.81, 0.0, 130.81, 0.0, 130.81, 0.0, 130.81, 0.0,
-                98.00,  0.0, 98.00,  0.0, 98.00,  0.0, 98.00,  0.0,
-                110.00, 0.0, 110.00, 0.0, 110.00, 0.0, 110.00, 0.0,
-                87.31,  0.0, 87.31,  0.0, 87.31,  0.0, 87.31,  0.0
+        Thread {
+            // Calm Meditative Zen Ambient Pad Chords (Cmaj9 -> Fmaj7 -> Am9 -> G6/9)
+            val chords = arrayOf(
+                doubleArrayOf(130.81, 196.00, 246.94, 293.66, 329.63), // Cmaj9
+                doubleArrayOf(174.61, 261.63, 329.63, 440.00),         // Fmaj7
+                doubleArrayOf(110.00, 164.81, 196.00, 261.63, 293.66), // Am9
+                doubleArrayOf(98.00, 146.83, 196.00, 246.94, 293.66)   // G6/9
             )
 
             val minBufSize = AudioTrack.getMinBufferSize(
@@ -134,7 +143,7 @@ class MainActivity : FlutterActivity() {
                 AudioFormat.ENCODING_PCM_16BIT
             )
 
-            val ambientTrack = AudioTrack.Builder()
+            val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_GAME)
@@ -148,77 +157,108 @@ class MainActivity : FlutterActivity() {
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .build()
                 )
-                .setBufferSizeInBytes(minBufSize * 4)
+                .setBufferSizeInBytes(max(minBufSize * 4, CHUNK_SIZE * 4))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
-            // Don't call play() yet — pre-fill the buffer first to avoid
-            // an initial speed-burst caused by rapid non-blocking writes
-            // into an empty AudioTrack buffer.
+            synchronized(ambientLock) {
+                if (mySession != ambientSessionId.get()) {
+                    track.release()
+                    return@Thread
+                }
+                currentAmbientTrack = track
+            }
 
-            var stepIdx = 0
-            val durationSeconds = 0.18
-            val numSamples = (SAMPLE_RATE * durationSeconds).toInt().coerceAtLeast(1)
-            val fadeLen = (SAMPLE_RATE * 0.005).toInt()
-            val amplitude = Short.MAX_VALUE * 0.07
-            val buffer = ShortArray(numSamples)
-            var hasStartedPlayback = false
+            val buffer = ShortArray(CHUNK_SIZE)
+            val chordDurationSamples = (SAMPLE_RATE * 4.5).toLong() // 4.5 seconds per chord
+            val crossfadeSamples = (SAMPLE_RATE * 1.0).toLong()     // 1.0 second crossfade
+            val maxAmplitude = Short.MAX_VALUE * 0.045               // Gentle 4.5% volume
+            var totalSampleIdx = 0L
+
+            // Track phases for continuous smooth waveforms
+            var phasesA = DoubleArray(5)
+            var phasesB = DoubleArray(5)
 
             try {
-                while (isAmbientPlaying) {
-                    val leadFreq = melodyNotes[stepIdx]
-                    val harmFreq = harmonyNotes[stepIdx]
-                    val bassFreq = bassNotes[stepIdx]
+                track.play()
 
-                    for (i in 0 until numSamples) {
-                        var sample = amplitude * sin(2.0 * PI * leadFreq * i / SAMPLE_RATE)
-                        if (harmFreq > 0) {
-                            sample += amplitude * 0.6 * sin(2.0 * PI * harmFreq * i / SAMPLE_RATE)
+                while (mySession == ambientSessionId.get()) {
+                    for (i in 0 until CHUNK_SIZE) {
+                        val currentChordIdx = ((totalSampleIdx / chordDurationSamples) % chords.size).toInt()
+                        val nextChordIdx = (currentChordIdx + 1) % chords.size
+                        val sampleInChord = totalSampleIdx % chordDurationSamples
+
+                        val chordA = chords[currentChordIdx]
+                        val chordB = chords[nextChordIdx]
+
+                        // Resize phase arrays if chord note count differs
+                        if (phasesA.size < chordA.size) phasesA = DoubleArray(chordA.size)
+                        if (phasesB.size < chordB.size) phasesB = DoubleArray(chordB.size)
+
+                        var sampleA = 0.0
+                        for (n in chordA.indices) {
+                            phasesA[n] += 2.0 * PI * chordA[n] / SAMPLE_RATE
+                            if (phasesA[n] >= 2.0 * PI) phasesA[n] -= 2.0 * PI
+                            // Warm sine wave with subtle octave overtone
+                            sampleA += sin(phasesA[n]) + 0.15 * sin(2.0 * phasesA[n])
                         }
-                        if (bassFreq > 0) {
-                            sample += amplitude * 0.8 * sin(2.0 * PI * bassFreq * i / SAMPLE_RATE)
+                        sampleA /= chordA.size
+
+                        var sampleB = 0.0
+                        for (n in chordB.indices) {
+                            phasesB[n] += 2.0 * PI * chordB[n] / SAMPLE_RATE
+                            if (phasesB[n] >= 2.0 * PI) phasesB[n] -= 2.0 * PI
+                            sampleB += sin(phasesB[n]) + 0.15 * sin(2.0 * phasesB[n])
+                        }
+                        sampleB /= chordB.size
+
+                        // Smooth crossfade between chords at the end of each chord
+                        val crossfadeStart = chordDurationSamples - crossfadeSamples
+                        val finalSample: Double = if (sampleInChord >= crossfadeStart) {
+                            val progress = (sampleInChord - crossfadeStart).toDouble() / crossfadeSamples.toDouble()
+                            val weightB = 0.5 * (1.0 - cos(PI * progress))
+                            val weightA = 1.0 - weightB
+                            (sampleA * weightA) + (sampleB * weightB)
+                        } else {
+                            sampleA
                         }
 
-                        val fadeIn = if (i < fadeLen) 0.5 * (1 - cos(PI * i / fadeLen)) else 1.0
-                        val fadeOut = if (i >= numSamples - fadeLen) 0.5 * (1 - cos(PI * (numSamples - i) / fadeLen)) else 1.0
+                        // Gentle LFO breathing modulation (~0.12 Hz)
+                        val lfo = 0.88 + 0.12 * sin(2.0 * PI * 0.12 * totalSampleIdx / SAMPLE_RATE)
+                        val scaled = (finalSample * maxAmplitude * lfo).toInt()
+                        buffer[i] = scaled.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
 
-                        buffer[i] = (sample * fadeIn * fadeOut).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                        totalSampleIdx++
                     }
 
-                    ambientTrack.write(buffer, 0, numSamples)
-
-                    // Start playback only after the first note is in the buffer
-                    if (!hasStartedPlayback) {
-                        ambientTrack.play()
-                        hasStartedPlayback = true
-                    }
-
-                    stepIdx = (stepIdx + 1) % melodyNotes.size
-
-                    val sleepMs = 210L
-                    Thread.sleep(sleepMs)
+                    if (mySession != ambientSessionId.get()) break
+                    track.write(buffer, 0, CHUNK_SIZE)
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                // Thread interrupted or stopped
             } finally {
-                try {
-                    ambientTrack.stop()
-                    ambientTrack.release()
-                } catch (_: Exception) {}
+                synchronized(ambientLock) {
+                    if (currentAmbientTrack === track) {
+                        try {
+                            track.stop()
+                            track.release()
+                        } catch (_: Exception) {}
+                        currentAmbientTrack = null
+                    }
+                }
             }
-        }.apply { start() }
-    }
-
-    private fun stopNativeAmbientMusic() {
-        isAmbientPlaying = false
-        ambientThread?.interrupt()
-        ambientThread = null
+        }.apply {
+            isDaemon = true
+            name = "ZenAmbientMusicThread-$mySession"
+            start()
+        }
     }
 
     private fun playTone(frequency: Double, durationSeconds: Double) {
         val numSamples = (SAMPLE_RATE * durationSeconds).toInt().coerceAtLeast(1)
         val fadeLen    = (SAMPLE_RATE * 0.005).toInt()   // 5 ms fade window
         val buffer     = ShortArray(numSamples)
-        val amplitude  = Short.MAX_VALUE * 0.55           // 55% volume
+        val amplitude  = Short.MAX_VALUE * 0.50           // 50% volume
 
         for (i in 0 until numSamples) {
             val fundamental = sin(2.0 * PI * frequency * i / SAMPLE_RATE)
@@ -244,7 +284,7 @@ class MainActivity : FlutterActivity() {
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_GAME)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                     .build()
             )
             .setAudioFormat(
@@ -264,8 +304,10 @@ class MainActivity : FlutterActivity() {
             val playbackMs = (durationSeconds * 1000).toLong() + 20L
             Thread.sleep(playbackMs)
         } finally {
-            audioTrack.stop()
-            audioTrack.release()
+            try {
+                audioTrack.stop()
+                audioTrack.release()
+            } catch (_: Exception) {}
         }
     }
 }
