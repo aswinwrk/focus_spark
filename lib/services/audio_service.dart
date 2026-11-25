@@ -18,6 +18,9 @@ abstract class AudioService {
   /// Stop ambient background music pad.
   void stopAmbientMusic();
 
+  /// Set ambient background music volume (0.0 to 1.0).
+  void setAmbientVolume(double volume);
+
   /// Trigger native hardware device vibration.
   void vibrate({int durationMs = 40});
 }

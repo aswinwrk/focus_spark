@@ -108,6 +108,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   // Track the current playback session ID to cancel outdated async loops
   int _playbackSessionId = 0;
   bool _isConfirmingRestart = false;
+  bool _isAdvancingLevel = false;
 
   // Level & Session Persistence
   bool _hasSavedSession = false;
@@ -168,6 +169,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   bool _isTutorialWaitingForTap = false;
   bool _showReverseAnnouncementOverlay = false;
 
+  // Google Play Games multi-account sync coordination
+  bool _isAccountSyncInProgress = true;
+  Future<void>? _activeSyncFuture;
+  Timer? _syncUiTimeoutTimer;
+
   @override
   void initState() {
     super.initState();
@@ -194,7 +200,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       duration: const Duration(milliseconds: 900),
     )..repeat(reverse: true);
 
-    _loadSettings();
+    // Start storage load and Play Games sign-in immediately during splash
+    // so account-specific progress is ready before Home Screen becomes interactive.
+    _initStorageAndAuth();
     _initAdMobBanner();
 
     AdService.instance.onAdOpened = () {
@@ -237,6 +245,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _syncUiTimeoutTimer?.cancel();
     _praiseController.dispose();
     _tutorialHandController.dispose();
     _timerNotifier.dispose();
@@ -247,6 +256,33 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     super.dispose();
   }
 
+  /// Ensures [_sequence.length] always matches [_level] so saved/resumed games
+  /// never run with fewer or more tiles than the active level number.
+  void _syncSequenceLengthToLevel() {
+    if (_level < 1) _level = 1;
+    while (_sequence.length < _level) {
+      _sequence.add(_random.nextInt(9));
+    }
+    if (_sequence.length > _level) {
+      _sequence.removeRange(_level, _sequence.length);
+    }
+  }
+
+  /// Safely resolves the expected tile index at [stepIndex] honoring Reverse Mode.
+  int? _expectedTileIndex(int stepIndex) {
+    if (stepIndex < 0 || stepIndex >= _sequence.length) return null;
+    final bool isReverse = _isReverseLevel(_level);
+    return isReverse
+        ? _sequence[_sequence.length - 1 - stepIndex]
+        : _sequence[stepIndex];
+  }
+
+  /// Level number currently represented by the screen theme/status banner.
+  /// During [GameState.successTransition], [_level] already holds the upcoming
+  /// next level, while celebration visuals belong to the just-completed level.
+  int get _activeDisplayLevel =>
+      _gameState == GameState.successTransition ? math.max(1, _level - 1) : _level;
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
@@ -255,10 +291,17 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       AudioService.instance.stopAmbientMusic();
       _cancelInputTimer();
       if (_gameState == GameState.playerInput || _gameState == GameState.playback) {
+        _playbackSessionId++;
         setState(() {
           _gameState = GameState.paused;
           _activePlaybackTile = null;
+          _tileEntryScales = List.filled(9, 1.0);
+          _syncSequenceLengthToLevel();
         });
+        _saveGameProgress();
+      } else if (_gameState == GameState.successTransition) {
+        // Ensure already-completed progress is persisted cleanly if app backgrounds here
+        _syncSequenceLengthToLevel();
         _saveGameProgress();
       }
     } else if (state == AppLifecycleState.resumed) {
@@ -272,26 +315,78 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   }
 
   // ── Persistence ─────────────────────────────────────────────────────────
+  Future<void> _initStorageAndAuth() async {
+    try {
+      await _loadSettings();
+    } catch (e) {
+      debugPrint('Load settings error: $e');
+    }
+    try {
+      await _syncPlayGamesUserAndSettings();
+    } finally {
+      _syncUiTimeoutTimer?.cancel();
+      if (mounted && _isAccountSyncInProgress) {
+        setState(() => _isAccountSyncInProgress = false);
+      }
+    }
+  }
+
   Future<void> _loadSettings() async {
     _storageService = await StorageService.init();
     await _loadSettingsFromStorage();
   }
 
-  Future<void> _syncPlayGamesUserAndSettings() async {
+  Future<void> _syncPlayGamesUserAndSettings() {
+    if (_activeSyncFuture != null) {
+      return _activeSyncFuture!;
+    }
+    final Future<void> syncFuture = _performPlayGamesUserSync().whenComplete(() {
+      _activeSyncFuture = null;
+    });
+    _activeSyncFuture = syncFuture;
+    return syncFuture;
+  }
+
+  Future<void> _performPlayGamesUserSync() async {
     try {
-      final signedIn = await PlayGamesService.signIn();
-      if (!signedIn || !mounted) return;
+      final profile = await PlayGamesService.signInAndFetchPlayer();
+      if (profile == null || !mounted) return;
 
-      final playerId = await PlayGamesService.getPlayerId();
-      final playerName = await PlayGamesService.getPlayerName();
+      _storageService ??= await StorageService.init();
+      final playerId = profile.playerId;
+      final playerName = profile.playerName;
 
-      if (_storageService != null && playerId != null && playerId.isNotEmpty) {
-        if (_storageService!.currentUserId != playerId) {
+      if (_storageService != null && playerId.isNotEmpty) {
+        final previousUserId = _storageService!.currentUserId;
+        if (previousUserId != playerId) {
+          final bool isExplicitAccountSwitch = previousUserId != null;
+          final bool preserveActiveGameplay =
+              !isExplicitAccountSwitch && _gameState != GameState.startScreen;
+
+          if (isExplicitAccountSwitch && _gameState != GameState.startScreen) {
+            _cancelInputTimer();
+            _playbackSessionId++;
+            setState(() {
+              _gameState = GameState.startScreen;
+              _isAdvancingLevel = false;
+              _isTutorialWaitingForTap = false;
+              _activePlaybackTile = null;
+              _showReverseAnnouncementOverlay = false;
+              _correctErrorTile = null;
+              _activeTapTile = null;
+              _hintedTile = null;
+              _tileEntryScales = List.filled(9, 1.0);
+            });
+            AudioService.instance.setAmbientVolume(0.50);
+          }
+
           _storageService!.setUserId(playerId);
           if (playerName != null && playerName.isNotEmpty) {
             await _storageService!.setPlayerName(playerName);
           }
-          await _loadSettingsFromStorage();
+          await _loadSettingsFromStorage(
+            preserveActiveGameplay: preserveActiveGameplay,
+          );
 
           final userHighScore = _storageService!.getHighScore();
           if (userHighScore > 0) {
@@ -304,7 +399,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
   }
 
-  Future<void> _loadSettingsFromStorage() async {
+  Future<void> _loadSettingsFromStorage({bool preserveActiveGameplay = false}) async {
     if (_storageService == null || !mounted) return;
     final bool hasSavedGame = _storageService!.hasActiveGame();
     final int savedLevel = _storageService!.getCurrentLevel();
@@ -318,14 +413,22 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             .split(',')
             .where((e) => e.trim().isNotEmpty)
             .map((e) => int.parse(e.trim()))
+            .where((idx) => idx >= 0 && idx < 9)
             .toList();
       } catch (_) {
         loadedSequence = [];
       }
     }
 
+    bool needsRepairedSave = false;
+    bool needsHighScoreSave = false;
+    int scoreToSave = 0;
+
     setState(() {
-      _highScore = _storageService!.getHighScore();
+      final int storedHighScore = _storageService!.getHighScore();
+      _highScore = preserveActiveGameplay
+          ? math.max(_highScore, storedHighScore)
+          : storedHighScore;
       _isMusicMuted = _storageService!.isMusicMuted();
       _isSfxMuted = _storageService!.isSfxMuted();
       _isHapticsMuted = _storageService!.isHapticsMuted();
@@ -333,26 +436,35 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _selectedThemeIndex = _storageService!.getThemeIndex();
       _hasSeenTutorial = _storageService!.hasSeenTutorial();
       _showTutorialCard = !_hasSeenTutorial;
-      if (!_hasSeenTutorial) {
-        _isVisualTutorialActive = true;
-      }
 
-      if (hasSavedGame && loadedSequence.isNotEmpty) {
-        _hasSavedSession = true;
-        _level = savedLevel > 0 ? savedLevel : 1;
-        _currentStreak = savedStreak;
-        _sequence.clear();
-        _sequence.addAll(loadedSequence);
-      } else {
-        _hasSavedSession = false;
-        _level = 1;
-        _currentStreak = 0;
-        _sequence.clear();
+      if (!preserveActiveGameplay) {
+        if (!_hasSeenTutorial) {
+          _isVisualTutorialActive = true;
+        }
+
+        if (hasSavedGame && (loadedSequence.isNotEmpty || savedLevel > 1)) {
+          _hasSavedSession = true;
+          _level = savedLevel > 0 ? savedLevel : 1;
+          _currentStreak = savedStreak;
+          _sequence.clear();
+          _sequence.addAll(loadedSequence);
+          final int loadedLen = _sequence.length;
+          _syncSequenceLengthToLevel();
+          if (_sequence.length != loadedLen) {
+            needsRepairedSave = true;
+          }
+        } else {
+          _hasSavedSession = false;
+          _level = 1;
+          _currentStreak = 0;
+          _sequence.clear();
+        }
       }
 
       if (_level > _highScore) {
         _highScore = _level;
-        _storageService!.setHighScore(_highScore);
+        needsHighScoreSave = true;
+        scoreToSave = _highScore;
       }
 
       // Music will be started after splash screen completes (_splashStage == 2)
@@ -378,18 +490,32 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       }
       _leaderboard = _deduplicateLeaderboardEntries(loadedLeaderboard);
     });
-  }
 
-  Future<void> _saveGameProgress() async {
-    if (!mounted) return;
-    if (_storageService != null) {
+    if (needsRepairedSave) {
       await _storageService!.saveActiveGame(
         level: _level,
         streak: _currentStreak,
         sequence: _sequence,
       );
     }
-    if (!_hasSavedSession) {
+    if (needsHighScoreSave) {
+      await _storageService!.setHighScore(scoreToSave);
+    }
+  }
+
+  Future<void> _saveGameProgress() async {
+    if (!mounted) return;
+    if (_gameState != GameState.startScreen || _sequence.isNotEmpty) {
+      _syncSequenceLengthToLevel();
+    }
+    if (_storageService != null && _sequence.isNotEmpty) {
+      await _storageService!.saveActiveGame(
+        level: _level,
+        streak: _currentStreak,
+        sequence: _sequence,
+      );
+    }
+    if (!_hasSavedSession && _sequence.isNotEmpty) {
       setState(() {
         _hasSavedSession = true;
       });
@@ -669,8 +795,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     _playbackSessionId++; // Invalidate active sequence playback loops
 
     setState(() {
-      _gameState = GameState.paused;
+      if (previousState != GameState.startScreen) {
+        _gameState = GameState.paused;
+      }
       _activePlaybackTile = null;
+      _showReverseAnnouncementOverlay = false;
       _isConfirmingRestart = true;
     });
 
@@ -821,13 +950,39 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         setState(() {
           _gameState = GameState.playback;
           _playerInput.clear();
+          _tileEntryScales = List.filled(9, 1.0);
+          _syncSequenceLengthToLevel();
         });
-        _runPlayback();
+        if (!_isTutorialWaitingForTap) {
+          _runPlayback();
+        }
       } else if (previousState == GameState.playerInput) {
         setState(() {
           _gameState = GameState.playerInput;
+          _tileEntryScales = List.filled(9, 1.0);
         });
         _startInputTimer();
+      } else if (previousState == GameState.successTransition) {
+        setState(() {
+          _gameState = GameState.successTransition;
+          _tileEntryScales = List.filled(9, 1.0);
+          _syncSequenceLengthToLevel();
+        });
+        _advanceToNextLevelPlayback(math.max(1, _level - 1));
+      } else if (previousState == GameState.errorTransition) {
+        setState(() {
+          _correctErrorTile = null;
+          _gameState = GameState.playback;
+          _playerInput.clear();
+          _tileEntryScales = List.filled(9, 1.0);
+          _syncSequenceLengthToLevel();
+          if (_isVisualTutorialActive && _level <= 2) {
+            _isTutorialWaitingForTap = true;
+          }
+        });
+        if (!_isTutorialWaitingForTap) {
+          _runPlayback();
+        }
       } else {
         setState(() {
           _gameState = previousState;
@@ -854,9 +1009,15 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
           _storageService?.setSeenTutorial(true);
         }
         _gameState = GameState.playback;
+        _isAdvancingLevel = false;
+        _isTutorialWaitingForTap = false;
+        _activePlaybackTile = null;
+        _correctErrorTile = null;
+        _activeTapTile = null;
         _sequence.clear();
         _playerInput.clear();
         _level = 1;
+        _sequence.add(_random.nextInt(9));
         _currentStreak = 0;
         _sessionMaxLevel = 1;
         _sessionMaxStreak = 0;
@@ -866,24 +1027,26 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _tileEntryScales = List.filled(9, 0.0);
       });
 
+      // Reduce music volume during gameplay for maximum focus and concentration
+      AudioService.instance.setAmbientVolume(0.22);
+
+      // Persist valid initial Level 1 + 1-tile sequence immediately
       _saveGameProgress();
 
       // Staggered tile entry animation then run playback
       Future.microtask(() async {
         for (int i = 0; i < 9; i++) {
           await Future.delayed(const Duration(milliseconds: 60));
-          if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
+          if (!mounted || _gameState != GameState.playback || _playbackSessionId != currentSession) return;
           setState(() => _tileEntryScales[i] = 1.0);
         }
 
-        if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
-        setState(() {
-          _sequence.add(_random.nextInt(9));
-          if (_isVisualTutorialActive && _level <= 2) {
+        if (!mounted || _gameState != GameState.playback || _playbackSessionId != currentSession) return;
+        if (_isVisualTutorialActive && _level <= 2) {
+          setState(() {
             _isTutorialWaitingForTap = true;
-          }
-        });
-        if (!_isTutorialWaitingForTap) {
+          });
+        } else {
           _runPlayback();
         }
       });
@@ -910,6 +1073,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     final currentSession = _playbackSessionId;
     HapticFeedback.mediumImpact();
 
+    bool needsRepairedSave = false;
+
     setState(() {
       if (!_hasSeenTutorial) {
         _hasSeenTutorial = true;
@@ -917,32 +1082,52 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _storageService?.setSeenTutorial(true);
       }
       _gameState = GameState.playback;
+      _isAdvancingLevel = false;
+      _isTutorialWaitingForTap = false;
+      _activePlaybackTile = null;
+      _showReverseAnnouncementOverlay = false;
+      _correctErrorTile = null;
+      _activeTapTile = null;
       _playerInput.clear();
       _showSessionSummary = false;
       _freeHintsRemainingInLevel = 1;
       _hintedTile = null;
       _tileEntryScales = List.filled(9, 0.0);
+
+      if (_level < 1) _level = 1;
+      final int prevLen = _sequence.length;
+      _syncSequenceLengthToLevel();
+      needsRepairedSave = (_sequence.length != prevLen);
     });
+
+    // Reduce music volume during gameplay for maximum focus and concentration
+    AudioService.instance.setAmbientVolume(0.22);
+
+    if (needsRepairedSave) {
+      await _saveGameProgress();
+    }
 
     // Staggered tile entry animation
     for (int i = 0; i < 9; i++) {
       await Future.delayed(const Duration(milliseconds: 60));
-      if (!mounted || _gameState == GameState.startScreen || _playbackSessionId != currentSession) return;
+      if (!mounted || _gameState != GameState.playback || _playbackSessionId != currentSession) return;
       setState(() => _tileEntryScales[i] = 1.0);
     }
 
-    if (_playbackSessionId != currentSession) return;
-    if (_sequence.isEmpty) {
-      _level = 1;
-      _sequence.add(_random.nextInt(9));
-      await _saveGameProgress();
+    if (!mounted || _gameState != GameState.playback || _playbackSessionId != currentSession) return;
+    if (_isVisualTutorialActive && _level <= 2) {
+      setState(() {
+        _isTutorialWaitingForTap = true;
+      });
+    } else {
+      _runPlayback();
     }
-    _runPlayback();
   }
 
   // ── Playback Engine ──────────────────────────────────────────────────────
   Future<void> _runPlayback() async {
     if (_gameState != GameState.playback) return;
+    _syncSequenceLengthToLevel();
     final currentSession = _playbackSessionId;
 
     final bool isTutorialMode = _isVisualTutorialActive && _level <= 2;
@@ -972,6 +1157,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     for (int i = 0; i < _sequence.length; i++) {
       if (_gameState != GameState.playback || _playbackSessionId != currentSession) return;
       final tileIndex = _sequence[i];
+      if (tileIndex < 0 || tileIndex >= 9) continue;
 
       setState(() => _activePlaybackTile = tileIndex);
 
@@ -1046,25 +1232,36 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void _handleTimeout() {
     if (_gameState != GameState.playerInput) return;
     _triggerHaptic(HapticType.error);
+    final int errorSession = _playbackSessionId;
+    final int? expectedTile = _expectedTileIndex(_playerInput.length);
     setState(() {
       _gameState = GameState.errorTransition;
       _currentStreak = 0;
-      _correctErrorTile = _sequence[_playerInput.length];
+      _correctErrorTile = expectedTile;
       _hintedTile = null;
     });
+    _saveGameProgress();
     _playWrongMoveTune();
 
     final failMsg = _getFailurePraiseText();
     _triggerPraiseText(failMsg, const Color(0xFFEF4444));
 
     Future.delayed(const Duration(milliseconds: 1200), () {
-      if (mounted && _gameState == GameState.errorTransition) {
+      if (mounted &&
+          _gameState == GameState.errorTransition &&
+          _playbackSessionId == errorSession) {
         setState(() {
           _correctErrorTile = null;
           _gameState = GameState.playback;
           _playerInput.clear();
+          _syncSequenceLengthToLevel();
+          if (_isVisualTutorialActive && _level <= 2) {
+            _isTutorialWaitingForTap = true;
+          }
         });
-        _runPlayback();
+        if (!_isTutorialWaitingForTap) {
+          _runPlayback();
+        }
       }
     });
   }
@@ -1073,15 +1270,25 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void _togglePause() {
     if (_gameState == GameState.playback || _gameState == GameState.playerInput) {
       _cancelInputTimer();
+      _playbackSessionId++;
       setState(() {
         _gameState = GameState.paused;
         _activePlaybackTile = null;
+        _showReverseAnnouncementOverlay = false;
+        _tileEntryScales = List.filled(9, 1.0);
       });
+      AudioService.instance.setAmbientVolume(0.35);
       HapticFeedback.selectionClick();
     } else if (_gameState == GameState.paused) {
-      setState(() => _gameState = GameState.playback);
+      setState(() {
+        _gameState = GameState.playback;
+        _syncSequenceLengthToLevel();
+      });
+      AudioService.instance.setAmbientVolume(0.22);
       HapticFeedback.selectionClick();
-      _runPlayback();
+      if (!_isTutorialWaitingForTap) {
+        _runPlayback();
+      }
     }
   }
 
@@ -1089,10 +1296,8 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void _triggerHint() {
     if (_gameState != GameState.playerInput || _playerInput.length >= _sequence.length) return;
 
-    final bool isReverse = _isReverseLevel(_level);
-    final nextTile = isReverse
-        ? _sequence[_sequence.length - 1 - _playerInput.length]
-        : _sequence[_playerInput.length];
+    final nextTile = _expectedTileIndex(_playerInput.length);
+    if (nextTile == null) return;
     final theme = _themes[_selectedThemeIndex];
 
     _spawnTileSparks(nextTile, theme.tileActiveGlow);
@@ -1248,22 +1453,26 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     _cancelInputTimer();
     _particleManager.clear();
     _playbackSessionId++; // Cancel any active async playback loops
-
-    if (_sequence.isNotEmpty) {
-      await _saveGameProgress();
-    }
+    _syncSequenceLengthToLevel();
 
     setState(() {
       _gameState = GameState.startScreen;
+      _isAdvancingLevel = false;
       _isTutorialWaitingForTap = false;
       _activePlaybackTile = null;
+      _showReverseAnnouncementOverlay = false;
       _correctErrorTile = null;
       _activeTapTile = null;
       _hintedTile = null;
       _tileEntryScales = List.filled(9, 1.0);
       _inputTimerPercentage = 1.0;
     });
+    AudioService.instance.setAmbientVolume(0.50);
     HapticFeedback.selectionClick();
+
+    if (_sequence.isNotEmpty) {
+      await _saveGameProgress();
+    }
   }
 
   // ── Reset Session ────────────────────────────────────────────────────────
@@ -1279,12 +1488,14 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
     setState(() {
       _gameState = GameState.startScreen;
+      _isAdvancingLevel = false;
       _isTutorialWaitingForTap = false;
       _sequence.clear();
       _playerInput.clear();
       _level = 1;
       _currentStreak = 0;
       _activePlaybackTile = null;
+      _showReverseAnnouncementOverlay = false;
       _correctErrorTile = null;
       _activeTapTile = null;
       _hintedTile = null;
@@ -1296,6 +1507,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         _showSessionSummary = true;
       }
     });
+    AudioService.instance.setAmbientVolume(0.50);
     HapticFeedback.mediumImpact();
 
     if (wasMeaningful) {
@@ -1314,6 +1526,12 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
     if (_gameState != GameState.playerInput) return;
 
+    final int? expectedIndex = _expectedTileIndex(_playerInput.length);
+    if (expectedIndex == null) {
+      _syncSequenceLengthToLevel();
+      return;
+    }
+
     _triggerHaptic(HapticType.light);
 
     if (_hintedTile != null) {
@@ -1322,10 +1540,6 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       });
     }
 
-    final bool isReverse = _isReverseLevel(_level);
-    final expectedIndex = isReverse
-        ? _sequence[_sequence.length - 1 - _playerInput.length]
-        : _sequence[_playerInput.length];
     final theme = _themes[_selectedThemeIndex];
 
     if (clickedIndex == expectedIndex) {
@@ -1335,24 +1549,39 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         // SUCCESS
         _cancelInputTimer();
         final completedLevel = _level;
+        final int successSession = _playbackSessionId;
+        bool shouldPersistHighScore = false;
+        bool shouldPersistSeenTutorial = false;
+
         setState(() {
           _gameState = GameState.successTransition;
           _currentStreak++;
+          // Atomically advance level AND sequence together so saved/reloaded state
+          // can never hold an incremented level with a shorter sequence.
           _level++;
+          _sequence.add(_random.nextInt(9));
+          _syncSequenceLengthToLevel();
           _freeHintsRemainingInLevel = 1;
           if (_level > _sessionMaxLevel) _sessionMaxLevel = _level;
           if (_currentStreak > _sessionMaxStreak) _sessionMaxStreak = _currentStreak;
           if (_level > _highScore) {
             _highScore = _level;
-            _storageService?.setHighScore(_highScore);
+            shouldPersistHighScore = true;
           }
 
           if (_isVisualTutorialActive && _level > 2) {
             _isVisualTutorialActive = false;
             _hasSeenTutorial = true;
-            _storageService?.setSeenTutorial(true);
+            shouldPersistSeenTutorial = true;
           }
         });
+        if (shouldPersistHighScore) {
+          _storageService?.setHighScore(_highScore);
+        }
+        if (shouldPersistSeenTutorial) {
+          _storageService?.setSeenTutorial(true);
+        }
+        _saveGameProgress();
         _recordLeaderboardScore(completedLevel, _currentStreak);
 
         _triggerHaptic(HapticType.victory);
@@ -1371,7 +1600,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
         }
 
         Future.delayed(const Duration(milliseconds: 850), () {
-          if (mounted && _gameState == GameState.successTransition) {
+          if (mounted &&
+              _gameState == GameState.successTransition &&
+              _playbackSessionId == successSession) {
             _showLevelCompletedModal(context, theme, completedLevel);
           }
         });
@@ -1379,6 +1610,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     } else {
       // FAILURE (zero-punishment rule)
       _cancelInputTimer();
+      final int errorSession = _playbackSessionId;
       setState(() {
         _gameState = GameState.errorTransition;
         _currentStreak = 0;
@@ -1392,11 +1624,14 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       _triggerPraiseText(failMsg, const Color(0xFFEF4444));
 
       Future.delayed(const Duration(milliseconds: 1200), () {
-        if (mounted && _gameState == GameState.errorTransition) {
+        if (mounted &&
+            _gameState == GameState.errorTransition &&
+            _playbackSessionId == errorSession) {
           setState(() {
             _correctErrorTile = null;
             _gameState = GameState.playback;
             _playerInput.clear();
+            _syncSequenceLengthToLevel();
             if (_isVisualTutorialActive && _level <= 2) {
               _isTutorialWaitingForTap = true;
             }
@@ -1411,7 +1646,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Status Text ──────────────────────────────────────────────────────────
   String _getStatusText() {
-    final bool isReverse = _isReverseLevel(_level);
+    final bool isReverse = _isReverseLevel(_activeDisplayLevel);
     switch (_gameState) {
       case GameState.startScreen:
         return 'Clear your mind. Tap Start to begin.';
@@ -2483,7 +2718,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   }
 
   Widget _buildReverseRoundBanner(GameTheme theme) {
-    if (!_isReverseLevel(_level) || _gameState == GameState.startScreen || _gameState == GameState.paused) {
+    if (!_isReverseLevel(_activeDisplayLevel) || _gameState == GameState.startScreen || _gameState == GameState.paused) {
       return const SizedBox.shrink();
     }
 
@@ -2654,7 +2889,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   Widget build(BuildContext context) {
     final isStart = _gameState == GameState.startScreen;
     final isGameActive = !isStart;
-    final theme = (isGameActive && _isReverseLevel(_level))
+    final theme = (isGameActive && _isReverseLevel(_activeDisplayLevel))
         ? reverseTheme
         : _themes[_selectedThemeIndex];
     final screenWidth = MediaQuery.of(context).size.width;
@@ -2684,14 +2919,45 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             if (!_isMusicMuted) {
               AudioService.instance.startAmbientMusic();
             }
-            // Sign in to Google Play Games and cleanly separate data per account
-            _syncPlayGamesUserAndSettings();
+            // Retry Play Games sync only if not yet signed in, and cap UI wait
+            if (_storageService?.currentUserId == null) {
+              if (_isAccountSyncInProgress) {
+                _syncUiTimeoutTimer?.cancel();
+                _syncUiTimeoutTimer = Timer(const Duration(milliseconds: 2500), () {
+                  if (mounted && _isAccountSyncInProgress) {
+                    setState(() => _isAccountSyncInProgress = false);
+                  }
+                });
+              }
+              _syncPlayGamesUserAndSettings().whenComplete(() {
+                _syncUiTimeoutTimer?.cancel();
+                if (mounted && _isAccountSyncInProgress) {
+                  setState(() => _isAccountSyncInProgress = false);
+                }
+              });
+            } else if (_isAccountSyncInProgress) {
+              setState(() => _isAccountSyncInProgress = false);
+            }
           }
         },
       );
     }
 
-    return Scaffold(
+    return PopScope(
+      canPop: !isGameActive,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        if (isGameActive) {
+          if (_gameState == GameState.paused) {
+            _confirmAndRestartSession(theme);
+          } else if (_gameState == GameState.playback || _gameState == GameState.playerInput) {
+            _togglePause();
+          } else if (_gameState == GameState.successTransition) {
+            _advanceToNextLevelPlayback(_level - 1);
+          }
+        }
+      },
+      child: Scaffold(
       body: AnimatedGradientBackground(
         colors: theme.bgGradient,
         child: SafeArea(
@@ -3012,7 +3278,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                 ),
                               ),
                               TextButton(
-                                onPressed: () => _confirmAndRestartSession(theme),
+                                onPressed: (_gameState == GameState.successTransition ||
+                                        _gameState == GameState.errorTransition)
+                                    ? null
+                                    : () => _confirmAndRestartSession(theme),
                                 style: TextButton.styleFrom(
                                   padding: const EdgeInsets.symmetric(
                                       horizontal: 10, vertical: 8),
@@ -3062,6 +3331,41 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                                       fontWeight: FontWeight.bold,
                                       fontSize: 12,
                                       letterSpacing: 1.0),
+                                ),
+                              ),
+                            ] else if (_isAccountSyncInProgress) ...[
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 20, vertical: 12),
+                                decoration: BoxDecoration(
+                                  color: theme.tileDefault.withValues(alpha: 0.45),
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(
+                                    color: theme.accentColor.withValues(alpha: 0.35),
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: theme.accentColor,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Text(
+                                      'SYNCING PROFILE...',
+                                      style: TextStyle(
+                                        color: theme.textPrimary.withValues(alpha: 0.8),
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 11.5,
+                                        letterSpacing: 1.1,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ] else ...[
@@ -3147,6 +3451,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     ),
         ),
       ),
+    ),
     );
   }
 
@@ -3177,17 +3482,21 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
 
   // ── Level Progression Helper ─────────────────────────────────────────────
   void _advanceToNextLevelPlayback(int completedLevel, {bool allowAd = true}) async {
-    if (!mounted || _gameState != GameState.successTransition) return;
+    if (!mounted || _gameState != GameState.successTransition || _isAdvancingLevel) return;
+    _isAdvancingLevel = true;
+    _playbackSessionId++;
 
     void startNextLevelSequence() {
-      if (!mounted) return;
+      _isAdvancingLevel = false;
+      if (!mounted || _gameState != GameState.successTransition) return;
       setState(() {
         _gameState = GameState.playback;
-        _sequence.add(_random.nextInt(9));
+        _syncSequenceLengthToLevel();
         if (_isVisualTutorialActive && _level <= 2) {
           _isTutorialWaitingForTap = true;
         }
       });
+      AudioService.instance.setAmbientVolume(0.22);
       _saveGameProgress();
       if (!_isTutorialWaitingForTap) {
         _runPlayback();
@@ -3195,13 +3504,17 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
     }
 
     if (allowAd && AdService.shouldShowInterstitialOnLevelComplete(completedLevel)) {
-      if (kIsWeb) {
-        _showTestInterstitialOverlay(onDismissed: startNextLevelSequence);
-      } else {
-        final shown = await AdService.instance.showInterstitialAdOrLoad(onDismissed: startNextLevelSequence);
-        if (!shown) {
-          startNextLevelSequence();
+      try {
+        if (kIsWeb) {
+          _showTestInterstitialOverlay(onDismissed: startNextLevelSequence);
+        } else {
+          final shown = await AdService.instance.showInterstitialAdOrLoad(onDismissed: startNextLevelSequence);
+          if (!shown) {
+            startNextLevelSequence();
+          }
         }
+      } catch (_) {
+        startNextLevelSequence();
       }
     } else {
       startNextLevelSequence();
@@ -3212,6 +3525,7 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
   void _showLevelCompletedModal(BuildContext context, GameTheme theme, int completedLevel) {
     HapticFeedback.mediumImpact();
     Future.delayed(const Duration(milliseconds: 80), () => HapticFeedback.mediumImpact());
+    AudioService.instance.setAmbientVolume(0.35);
 
     String? milestoneRank;
     if (completedLevel == 5) {
@@ -3228,15 +3542,25 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       milestoneRank = 'MINDFUL LEGEND';
     }
 
+    bool nextActionHandled = false;
+
     showDialog(
       context: context,
       barrierDismissible: false,
       barrierColor: Colors.black.withValues(alpha: 0.8),
-      builder: (context) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
-          child: Container(
+      builder: (dialogCtx) {
+        return PopScope(
+          canPop: true,
+          onPopInvokedWithResult: (didPop, result) {
+            if (didPop && !nextActionHandled) {
+              nextActionHandled = true;
+              _advanceToNextLevelPlayback(completedLevel);
+            }
+          },
+          child: Dialog(
+            backgroundColor: Colors.transparent,
+            insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+            child: Container(
             constraints: const BoxConstraints(maxWidth: 400),
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
             decoration: BoxDecoration(
@@ -3416,8 +3740,11 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                   width: double.infinity,
                   child: ElevatedButton.icon(
                     onPressed: () {
-                      Navigator.of(context).pop();
-                      _advanceToNextLevelPlayback(completedLevel);
+                      if (!nextActionHandled) {
+                        nextActionHandled = true;
+                        Navigator.of(dialogCtx).pop();
+                        _advanceToNextLevelPlayback(completedLevel);
+                      }
                     },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: theme.accentColor,
@@ -3448,14 +3775,17 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                   width: double.infinity,
                   child: OutlinedButton.icon(
                     onPressed: () {
-                      Navigator.of(context).pop();
-                      _showLevelRoadmapModal(
-                        context,
-                        theme,
-                        onDismiss: () {
-                          _advanceToNextLevelPlayback(completedLevel, allowAd: false);
-                        },
-                      );
+                      if (!nextActionHandled) {
+                        nextActionHandled = true;
+                        Navigator.of(dialogCtx).pop();
+                        _showLevelRoadmapModal(
+                          context,
+                          theme,
+                          onDismiss: () {
+                            _advanceToNextLevelPlayback(completedLevel, allowAd: false);
+                          },
+                        );
+                      }
                     },
                     style: OutlinedButton.styleFrom(
                       foregroundColor: theme.textPrimary,
@@ -3477,13 +3807,46 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
                     ),
                   ),
                 ),
+
+                const SizedBox(height: 8),
+
+                // Tertiary Action Button: RETURN TO MAIN MENU
+                TextButton.icon(
+                  onPressed: () {
+                    if (!nextActionHandled) {
+                      nextActionHandled = true;
+                      Navigator.of(dialogCtx).pop();
+                      _goHome();
+                    }
+                  },
+                  icon: Icon(
+                    Icons.home_outlined,
+                    size: 16,
+                    color: theme.textPrimary.withValues(alpha: 0.75),
+                  ),
+                  label: Text(
+                    'MAIN MENU',
+                    style: GoogleFonts.spaceGrotesk(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 1.0,
+                      color: theme.textPrimary.withValues(alpha: 0.75),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
-        );
-      },
-    );
-  }
+        ),
+      );
+    },
+  ).then((_) {
+    if (!nextActionHandled && mounted && _gameState == GameState.successTransition) {
+      nextActionHandled = true;
+      _advanceToNextLevelPlayback(completedLevel);
+    }
+  });
+}
 
   // ── Modular Modal Dialog Delegates ───────────────────────────────────────
   void _showTutorialModal(BuildContext context, GameTheme theme) {
@@ -3634,6 +3997,10 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
       message: 'Hall of Fame Leaderboard',
       child: GestureDetector(
         onTap: () {
+          if (_gameState == GameState.successTransition ||
+              _gameState == GameState.errorTransition) {
+            return;
+          }
           HapticFeedback.selectionClick();
           // Pause game safely if viewing leaderboard during active gameplay
           if (_gameState == GameState.playerInput || _gameState == GameState.playback) {
@@ -3642,7 +4009,9 @@ class _FocusSparkScreenState extends State<FocusSparkScreen>
             setState(() {
               _gameState = GameState.paused;
               _activePlaybackTile = null;
+              _tileEntryScales = List.filled(9, 1.0);
             });
+            AudioService.instance.setAmbientVolume(0.35);
           }
           _showLeaderboardModal(context, theme);
         },

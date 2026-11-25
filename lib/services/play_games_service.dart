@@ -10,12 +10,49 @@ class LeaderboardOpenResult {
   const LeaderboardOpenResult({required this.opened, this.error});
 }
 
+class PlayGamesPlayerInfo {
+  final String playerId;
+  final String? playerName;
+
+  const PlayGamesPlayerInfo({required this.playerId, this.playerName});
+}
+
 /// Service for Google Play Games Services integration.
 /// Handles authentication, score submission, and native leaderboard display.
 class PlayGamesService {
   static const String _leaderboardId = 'CgkIoMGk--0UEAIQAA';
   static Completer<bool>? _authCompleter;
   static String? _lastAuthError;
+
+  /// Signs in (if needed) and retrieves both [playerId] and [playerName] in a
+  /// single platform roundtrip so account switching resolves fast without
+  /// redundant avatar/player stream queries.
+  static Future<PlayGamesPlayerInfo?> signInAndFetchPlayer() async {
+    try {
+      final signedIn = await signIn();
+      if (!signedIn) return null;
+
+      final playerData = await GamesServices.player.first
+          .timeout(const Duration(seconds: 4), onTimeout: () => null);
+      if (playerData == null) return null;
+
+      final rawId = playerData.playerID?.trim();
+      final displayName = playerData.displayName.trim();
+      // Fallback to deterministic gamertag ID only if Android privacy settings hide playerID
+      final resolvedId = (rawId != null && rawId.isNotEmpty)
+          ? rawId
+          : (displayName.isNotEmpty ? 'name_$displayName' : null);
+
+      if (resolvedId == null || resolvedId.isEmpty) return null;
+      return PlayGamesPlayerInfo(
+        playerId: resolvedId,
+        playerName: displayName.isNotEmpty ? displayName : null,
+      );
+    } catch (e) {
+      debugPrint('PlayGames signInAndFetchPlayer error: $e');
+      return null;
+    }
+  }
 
   /// Check whether the player is genuinely signed in to Google Play Games natively.
   static Future<bool> isSignedIn() async {

@@ -27,6 +27,11 @@ class NativeAudioService implements AudioService {
   }
 
   @override
+  void setAmbientVolume(double volume) {
+    _invokeChannel('setAmbientVolume', {'volume': volume});
+  }
+
+  @override
   void vibrate({int durationMs = 40}) {
     _invokeChannel('vibrate', {'durationMs': durationMs});
   }

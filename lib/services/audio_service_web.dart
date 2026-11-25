@@ -42,6 +42,11 @@ class WebAudioService implements AudioService {
   }
 
   @override
+  void setAmbientVolume(double volume) {
+    // Web audio volume adjustment stub
+  }
+
+  @override
   void vibrate({int durationMs = 40}) {
     // Vibration is handled by HapticFeedback on Web if supported by browser navigator.vibrate
   }

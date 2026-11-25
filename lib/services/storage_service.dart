@@ -146,14 +146,19 @@ class StorageService {
     required int streak,
     required List<int> sequence,
   }) async {
-    await _prefs.setBool(_userKey(keyHasActiveGame), true);
-    await _prefs.setInt(_userKey(keyCurrentLevel), level);
-    await _prefs.setInt(_userKey(keyCurrentStreak), streak);
-    await _prefs.setString(_userKey(keyCurrentSequence), sequence.join(','));
+    final safeLevel = level < 1 ? 1 : level;
+    await Future.wait([
+      _prefs.setBool(_userKey(keyHasActiveGame), true),
+      _prefs.setInt(_userKey(keyCurrentLevel), safeLevel),
+      _prefs.setInt(_userKey(keyCurrentStreak), streak),
+      _prefs.setString(_userKey(keyCurrentSequence), sequence.join(',')),
+    ]);
   }
 
   Future<void> clearActiveGame() async {
-    await _prefs.setBool(_userKey(keyHasActiveGame), false);
-    await _prefs.remove(_userKey(keyCurrentSequence));
+    await Future.wait([
+      _prefs.setBool(_userKey(keyHasActiveGame), false),
+      _prefs.remove(_userKey(keyCurrentSequence)),
+    ]);
   }
 }
